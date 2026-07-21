@@ -1,0 +1,39 @@
+# Development environment configuration
+app:
+  name: "Job Agent OS"
+  env: "dev"
+  debug: true
+  version: "0.1.0"
+
+database:
+  url: "postgresql+asyncpg://postgres:postgres@localhost:5432/job_agent_os"
+  pool_size: 10
+  max_overflow: 20
+  echo: true
+
+redis:
+  url: "redis://localhost:6379/0"
+  max_connections: 20
+
+jwt:
+  algorithm: "HS256"
+  access_token_expire_minutes: 30
+  refresh_token_expire_days: 7
+
+llm:
+  provider: "openai"
+  model: "gpt-4o"
+  temperature: 0.1
+  max_tokens: 4096
+  timeout: 60
+
+langfuse:
+  base_url: "https://cloud.langfuse.com"
+  enabled: false
+
+harness:
+  max_steps: 50
+  token_budget_per_session: 100000
+  tool_timeout_seconds: 30
+  max_retries: 3
+  loop_detection_threshold: 3

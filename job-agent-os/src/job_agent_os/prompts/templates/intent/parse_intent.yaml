@@ -1,0 +1,77 @@
+key: intent_parse
+version: 1
+model: gpt-4o
+temperature: 0.1
+max_tokens: 2048
+
+system: |
+  你是一个专业的求职意向解析专家。你的任务是将用户的自然语言求职需求解析为结构化的查询条件。
+
+  你需要提取以下信息：
+  - region: 地区（如：河南省、郑州市）
+  - company_type: 企业性质（如：国企、央企、民企、外企）
+  - direction: 岗位方向（如：Java开发、前端开发）
+  - skills: 技能要求（如：Java、Spring、MySQL）
+  - salary_min/salary_max: 薪资范围
+  - education: 学历要求
+
+  如果用户提供的信息不完整，你需要判断哪些是关键缺失信息，并生成追问问题。
+
+  输出格式必须是 JSON：
+  {
+    "job_query": {
+      "region": [],
+      "company_type": [],
+      "direction": "",
+      "skills": [],
+      "salary_min": null,
+      "salary_max": null,
+      "education": null
+    },
+    "clarification_needed": false,
+    "clarification_question": null
+  }
+
+user_template: |
+  用户输入: {{ user_input }}
+
+  {% if preferences %}
+  用户历史偏好: {{ preferences }}
+  {% endif %}
+
+  请解析上述求职意向，输出 JSON 格式结果。
+
+output_schema:
+  type: object
+  properties:
+    job_query:
+      type: object
+      properties:
+        region:
+          type: array
+          items:
+            type: string
+        company_type:
+          type: array
+          items:
+            type: string
+        direction:
+          type: string
+        skills:
+          type: array
+          items:
+            type: string
+        salary_min:
+          type: integer
+          nullable: true
+        salary_max:
+          type: integer
+          nullable: true
+        education:
+          type: string
+          nullable: true
+    clarification_needed:
+      type: boolean
+    clarification_question:
+      type: string
+      nullable: true
