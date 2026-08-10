@@ -8,7 +8,6 @@ from job_agent_os.schemas.auth import (
     LoginRequest,
     RefreshTokenRequest,
     RegisterRequest,
-    TokenResponse,
 )
 from job_agent_os.services.auth_service import AuthService
 
@@ -19,13 +18,12 @@ router = APIRouter()
 async def register(request: RegisterRequest, db: DBSession) -> dict:
     """Register a new user."""
     service = AuthService(db)
-    user = await service.register(
+    user, tokens = await service.register(
         username=request.username,
         email=request.email,
         password=request.password,
         phone=request.phone,
     )
-    _, tokens = await service.login(request.email, request.password)
     return success_response(data=tokens.model_dump())
 
 

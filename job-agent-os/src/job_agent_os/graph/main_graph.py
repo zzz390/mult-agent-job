@@ -1,113 +1,94 @@
-"""Main workflow graph construction and compilation."""
+"""Main workflow graph - Supervisor loop architecture.
+
+Architecture:
+    START -> supervisor -> [dynamic route] -> specialist agent -> supervisor -> ... -> END
+
+The Supervisor uses LLM structured output to decide which agent to call next.
+Each specialist agent is a ReAct agent that calls tools autonomously.
+After each agent completes, control returns to the Supervisor for the next decision.
+"""
 
 from langgraph.graph import END, START, StateGraph
 
 from job_agent_os.graph.checkpointer import get_checkpointer
-from job_agent_os.graph.edges import (
-    after_human_clarify,
-    after_human_review,
-    after_resume_approval,
-    should_clarify,
-)
+from job_agent_os.graph.edges import route_from_supervisor
 from job_agent_os.graph.nodes import (
-    human_approve_node,
-    human_clarify_node,
-    human_review_node,
     intent_node,
     interview_node,
     match_node,
     parse_node,
     resume_node,
     search_node,
+    supervisor_node,
     tracker_node,
+    web_search_node,
 )
 from job_agent_os.graph.state import JobAgentState
 
+# All specialist agents that Supervisor can route to
+SPECIALIST_AGENTS = [
+    "intent",
+    "search",
+    "web_search",
+    "parse",
+    "match",
+    "resume",
+    "interview",
+    "tracker",
+]
+
 
 def build_main_graph():  # type: ignore
-    """Build and compile the main workflow graph.
+    """Build and compile the Supervisor-loop workflow graph.
 
     Graph flow:
-    START -> intent -> [clarify?] -> search -> parse -> match -> human_review
-         -> resume -> human_approve -> interview -> tracker -> END
+    START -> supervisor -> [route_from_supervisor] -> agent -> supervisor -> ... -> END
     """
-    # Create state graph
     workflow = StateGraph(JobAgentState)
 
-    # Add nodes
+    # Add supervisor node
+    workflow.add_node("supervisor", supervisor_node)
+
+    # Add all specialist agent nodes
     workflow.add_node("intent", intent_node)
     workflow.add_node("search", search_node)
+    workflow.add_node("web_search", web_search_node)
     workflow.add_node("parse", parse_node)
     workflow.add_node("match", match_node)
     workflow.add_node("resume", resume_node)
     workflow.add_node("interview", interview_node)
     workflow.add_node("tracker", tracker_node)
 
-    # Human-in-the-loop nodes
-    workflow.add_node("human_clarify", human_clarify_node)
-    workflow.add_node("human_review", human_review_node)
-    workflow.add_node("human_approve", human_approve_node)
+    # Entry point: always start with supervisor
+    workflow.add_edge(START, "supervisor")
 
-    # Add edges
-    workflow.add_edge(START, "intent")
-
-    # Intent -> conditional (clarify or search)
+    # Supervisor dynamic routing (core of the architecture)
     workflow.add_conditional_edges(
-        "intent",
-        should_clarify,
+        "supervisor",
+        route_from_supervisor,
         {
-            "human_clarify": "human_clarify",
+            "intent": "intent",
             "search": "search",
-        },
-    )
-
-    # Human clarify -> back to intent
-    workflow.add_conditional_edges(
-        "human_clarify",
-        after_human_clarify,
-        {"intent": "intent"},
-    )
-
-    # Search -> Parse -> Match
-    workflow.add_edge("search", "parse")
-    workflow.add_edge("parse", "match")
-
-    # Match -> Human review
-    workflow.add_edge("match", "human_review")
-
-    # Human review -> conditional (resume or match)
-    workflow.add_conditional_edges(
-        "human_review",
-        after_human_review,
-        {
-            "resume": "resume",
+            "web_search": "web_search",
+            "parse": "parse",
             "match": "match",
-        },
-    )
-
-    # Resume -> Human approve
-    workflow.add_edge("resume", "human_approve")
-
-    # Human approve -> conditional (interview or resume)
-    workflow.add_conditional_edges(
-        "human_approve",
-        after_resume_approval,
-        {
-            "interview": "interview",
             "resume": "resume",
+            "interview": "interview",
+            "tracker": "tracker",
+            "__end__": END,
         },
     )
 
-    # Interview -> Tracker -> END
-    workflow.add_edge("interview", "tracker")
-    workflow.add_edge("tracker", END)
+    # Every specialist agent returns to supervisor after execution
+    for agent_name in SPECIALIST_AGENTS:
+        workflow.add_edge(agent_name, "supervisor")
 
-    # Compile with checkpointer and interrupt points
+    # Compile with checkpointer for session persistence
     checkpointer = get_checkpointer()
 
     return workflow.compile(
         checkpointer=checkpointer,
-        interrupt_before=["human_clarify", "human_review", "human_approve"],
+        interrupt_before=["resume"],
     )
 
 

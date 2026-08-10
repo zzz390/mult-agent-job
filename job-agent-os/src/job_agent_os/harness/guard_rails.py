@@ -8,10 +8,12 @@ Guards:
 - OutputValidationGuard: validate output format
 """
 
+import logging
 from collections import defaultdict
-from typing import Any
 
 from job_agent_os.settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class GuardRailViolation(Exception):
@@ -138,6 +140,14 @@ class OutputValidationGuard(BaseGuard):
             )
         # Soft validation: log warning but don't block
         # (strict mode can raise GuardRailViolation)
+        for field_name in self.required_fields:
+            if field_name not in result:
+                logger.warning(
+                    "[%s] Node '%s' output missing required field '%s'",
+                    self.name,
+                    node_name,
+                    field_name,
+                )
 
 
 class GuardRailChain:

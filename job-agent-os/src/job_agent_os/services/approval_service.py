@@ -1,5 +1,7 @@
 """Approval service."""
 
+import asyncio
+import logging
 from uuid import UUID
 
 from sqlalchemy import select
@@ -8,12 +10,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from job_agent_os.core.error_codes import ErrorCode
 from job_agent_os.core.exceptions import NotFoundException, ValidationException
 from job_agent_os.core.utils import utc_now
+from job_agent_os.db.session import get_session_factory
 from job_agent_os.models.human_approval import HumanApproval
 from job_agent_os.models.user import User
 from job_agent_os.schemas.approval import (
     ApprovalRespondRequest,
     BatchApprovalRequest,
 )
+
+logger = logging.getLogger(__name__)
+
+# Keep references to background tasks to prevent garbage collection
+_background_tasks: set[asyncio.Task] = set()
+
+
+async def _resume_session_background(session_id: str) -> None:
+    """Resume session execution in background with independent DB session.
+
+    Creates its own session via get_session_factory() so the background
+    task is not tied to the request-scoped session.
+    """
+    from job_agent_os.services.session_service import SessionService
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        service = SessionService(session)
+        await service.resume_session(session_id)
 
 
 class ApprovalService:
@@ -81,9 +103,45 @@ class ApprovalService:
         await self.db.flush()
         await self.db.refresh(approval)
 
-        # In full implementation, this would resume the LangGraph execution
-        # via the checkpointer mechanism
+        # Resume the LangGraph execution with the user's decision
+        await self._resume_graph(approval, data)
+
         return approval
+
+    async def _resume_graph(
+        self, approval: HumanApproval, data: ApprovalRespondRequest
+    ) -> None:
+        """Inject user decision into graph state and resume execution."""
+        from job_agent_os.graph.main_graph import get_main_graph
+
+        session_id = str(approval.session_id)
+
+        try:
+            graph = get_main_graph()
+            config = {"configurable": {"thread_id": session_id}}
+
+            # Build state update based on approval type and user action
+            state_update: dict = {"pending_approval": None}
+
+            if approval.approval_type == "resume_approval":
+                state_update["resume_approved"] = data.action == "approve"
+                state_update["human_feedback"] = data.action
+            elif approval.approval_type == "recommendation_review":
+                state_update["human_feedback"] = data.action
+                if data.action == "reject":
+                    state_update["human_feedback"] = "reject - re-match"
+            else:
+                state_update["human_feedback"] = data.action
+
+            # Update graph checkpoint state with user's decision
+            await graph.aupdate_state(config, state_update)
+
+            # Resume execution in background with independent DB session
+            task = asyncio.create_task(_resume_session_background(session_id))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+        except Exception:
+            logger.exception("Failed to resume session after approval")
 
     async def batch_respond(
         self, user: User, data: BatchApprovalRequest
@@ -116,4 +174,3 @@ class ApprovalService:
                     }
                 )
         return results
-"""Approval service."""

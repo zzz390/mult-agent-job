@@ -18,8 +18,11 @@ class ApprovalResponse(BaseModel):
     payload: dict
     options: list[str] = Field(default_factory=list)
     status: str
+    action: str | None = None
+    feedback: str | None = None
     timeout_seconds: int | None = None
     requested_at: datetime
+    responded_at: datetime | None = None
 
 
 class ApprovalRespondRequest(BaseModel):

@@ -27,4 +27,3 @@ __all__ = [
     "User",
     "UUIDMixin",
 ]
-"""Models package - SQLAlchemy ORM models."""

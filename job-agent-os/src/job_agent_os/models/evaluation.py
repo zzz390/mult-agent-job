@@ -16,6 +16,8 @@ class Evaluation(Base, UUIDMixin, TimestampMixin):
 
     user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     agent_log_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_logs.id"), nullable=True)
+    # Note: session_id has no ForeignKey constraint because sessions may be
+    # stored in-memory (e.g. LangGraph checkpointer) rather than in a DB table.
     session_id: Mapped[UUID | None] = mapped_column(nullable=True)
     eval_type: Mapped[str] = mapped_column(String(50), nullable=False)
     agent_name: Mapped[str] = mapped_column(String(50), nullable=False)

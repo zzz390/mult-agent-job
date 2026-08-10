@@ -1,6 +1,7 @@
 """Interview endpoints."""
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, status
@@ -16,6 +17,29 @@ router = APIRouter()
 
 # In-memory task store for async question generation
 _generation_tasks: dict[str, dict] = {}
+
+# TTL for completed tasks (30 minutes)
+_TASK_TTL_MINUTES = 30
+
+
+def _cleanup_expired_tasks() -> None:
+    """Remove completed tasks older than _TASK_TTL_MINUTES."""
+    now = datetime.now(UTC)
+    expired_keys = []
+    for task_id, task in _generation_tasks.items():
+        if task.get("status") in ("completed", "failed"):
+            created_at_str = task.get("created_at")
+            if created_at_str:
+                try:
+                    created_at = datetime.fromisoformat(created_at_str)
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=UTC)
+                    if now - created_at > timedelta(minutes=_TASK_TTL_MINUTES):
+                        expired_keys.append(task_id)
+                except (ValueError, TypeError):
+                    expired_keys.append(task_id)
+    for key in expired_keys:
+        _generation_tasks.pop(key, None)
 
 
 @router.post("/questions", status_code=status.HTTP_202_ACCEPTED)
@@ -55,6 +79,8 @@ async def get_generation_result(
     user: CurrentUser,
 ) -> dict:
     """Get question generation result."""
+    # Clean up expired tasks before accessing
+    _cleanup_expired_tasks()
     task = _generation_tasks.get(task_id)
     if not task:
         raise NotFoundException(

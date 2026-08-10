@@ -8,7 +8,7 @@ Strategies:
 """
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable
 
@@ -67,6 +67,7 @@ class RecoveryManager:
         self._failure_history: list[FailureRecord] = []
         self._degraded: bool = False
         self._skipped_platforms: set[str] = set()
+        self._use_fallback: bool = False
 
     def determine_recovery(
         self, node_name: str, error: Exception, attempt: int
@@ -119,7 +120,7 @@ class RecoveryManager:
             settings = get_settings()
             return RecoveryAction(
                 strategy=RecoveryStrategy.DEGRADE_MODEL,
-                reason=f"Max retries reached, degrading to fallback model",
+                reason="Max retries reached, degrading to fallback model",
                 fallback_model=settings.openai_model_fallback,
             )
 
@@ -161,15 +162,17 @@ class RecoveryManager:
                     await asyncio.sleep(action.retry_delay)
                     continue
                 elif action.strategy == RecoveryStrategy.DEGRADE_MODEL:
-                    # Signal caller to use fallback model
-                    kwargs["_use_fallback"] = True
+                    # Signal caller to use fallback model via instance attribute
+                    self._use_fallback = True
                     continue
                 elif action.strategy == RecoveryStrategy.SKIP:
                     return None  # Skip this node/platform
                 elif action.strategy == RecoveryStrategy.ABORT:
                     break
 
-        raise last_error  # type: ignore[misc]
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Unknown error after retries")
 
     def is_platform_skipped(self, platform: str) -> bool:
         """Check if a platform has been skipped."""
@@ -195,6 +198,7 @@ class RecoveryManager:
         self._failure_history = []
         self._degraded = False
         self._skipped_platforms = set()
+        self._use_fallback = False
 
     def _is_platform_error(self, error: Exception) -> bool:
         """Check if error is from an external platform."""

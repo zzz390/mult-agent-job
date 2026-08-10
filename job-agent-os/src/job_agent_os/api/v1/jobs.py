@@ -26,6 +26,7 @@ async def trigger_job_search(
     service = JobService(db)
     structured = request.structured_query.model_dump() if request.structured_query else None
     session_id = await service.trigger_search(
+        user=user,
         query_text=request.query_text,
         structured_query=structured,
         platforms=request.platforms,

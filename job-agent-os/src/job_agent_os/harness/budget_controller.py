@@ -5,7 +5,8 @@ Real-time token counting with:
 - 100% degradation to smaller model or termination
 """
 
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass
 from enum import Enum
 
 from job_agent_os.settings import get_settings
@@ -51,7 +52,7 @@ class BudgetController:
         self.total_budget = budget or settings.harness_token_budget_per_session
         self.tokens_used: int = 0
         self._degraded: bool = False
-        self._history: list[dict] = []
+        self._history: deque[dict] = deque(maxlen=1000)
 
     def record_usage(self, tokens: int, node_name: str = "") -> BudgetStatus:
         """Record token usage and return current status."""
@@ -127,4 +128,4 @@ class BudgetController:
         """Reset budget for a new session."""
         self.tokens_used = 0
         self._degraded = False
-        self._history = []
+        self._history = deque(maxlen=1000)

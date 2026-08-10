@@ -28,7 +28,4 @@ async def update_user_info(
     await db.flush()
     await db.refresh(user)
     return success_response(data=UserResponse.model_validate(user).model_dump())
-from fastapi import APIRouter
-
-router = APIRouter()
 

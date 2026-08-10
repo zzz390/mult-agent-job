@@ -60,8 +60,15 @@ class JobResponse(BaseModel):
     company_type: str | None = None
     location: str | None = None
     salary_range: str | None = None
+    industry: str | None = None
+    salary_min: int | None = None
+    salary_max: int | None = None
     education_required: str | None = None
+    experience_required: str | None = None
     skills_required: list[str] = Field(default_factory=list)
+    skills_preferred: list[str] = Field(default_factory=list)
+    headcount: int | None = None
+    job_type: str | None = None
     structured_jd: dict = Field(default_factory=dict)
     deadline: date | None = None
     source_platform: str

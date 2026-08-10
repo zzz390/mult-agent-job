@@ -1,9 +1,8 @@
-"""Intent Agent - Parse user job search intent using LLM structured output."""
+"""Intent Agent - Parse user job search intent using LLM structured output (ReAct)."""
 
 import json
-from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from job_agent_os.agents.base import BaseAgent
@@ -24,128 +23,116 @@ class IntentOutput(BaseModel):
     clarification_question: str | None = Field(default=None, description="追问问题")
 
 
-class IntentAgent(BaseAgent):
-    """Intent Agent parses user's natural language job search intent.
+INTENT_SYSTEM_PROMPT = """你是求职意向解析专家。你的任务是从用户的自然语言输入中提取结构化的求职意向。
 
-    Uses LLM with_structured_output for reliable parsing.
-    Supports multi-turn conversation context.
-    """
+你需要提取以下信息：
+- region: 期望工作地区（如：河南、郑州、北京）
+- company_type: 企业性质（如：国企、央企、外企、民企）
+- direction: 岗位方向（如：Python、Java、前端、算法）
+- skills: 具体技能要求
+- salary_min/salary_max: 薪资范围（K为单位）
+- education: 学历要求
+
+判断规则：
+- 只要用户提供了"地区"和"岗位方向/技能"中的任意一项，就足以进行搜索，不需要追问。
+- 只有当用户输入完全无法提取任何有效信息时，才设置 clarification_needed=true。
+- "python""java""前端"等应识别为岗位方向(direction)。
+
+请以JSON格式输出解析结果。"""
+
+
+class IntentAgent(BaseAgent):
+    """Intent Agent parses user's natural language job search intent (ReAct mode)."""
 
     name = "intent"
-    required_tools: list[str] = []
-    prompt_key = "intent_parse"
+    system_prompt = INTENT_SYSTEM_PROMPT
+    agent_tools: list[str] = []  # Intent agent doesn't need external tools
+    max_iterations = 2
 
-    async def execute(self, state: JobAgentState) -> dict:
-        """Execute intent parsing with structured output."""
+    def _build_initial_messages(self, state: JobAgentState) -> list[BaseMessage]:
+        """Build messages with user's input for intent parsing."""
         messages = state.get("messages", [])
         user_input = ""
         if messages:
-            last_message = messages[-1]
-            if isinstance(last_message, HumanMessage):
-                user_input = last_message.content
-            elif hasattr(last_message, "content"):
-                user_input = str(last_message.content)
+            last_msg = messages[-1]
+            if isinstance(last_msg, HumanMessage):
+                user_input = last_msg.content
+            elif hasattr(last_msg, "content"):
+                user_input = str(last_msg.content)
+
+        # Also check task_instruction from Supervisor
+        task = self._get_task_instruction(state)
+        if task and not user_input:
+            user_input = task
 
         if not user_input:
+            user_input = "（用户未提供输入）"
+
+        return [
+            SystemMessage(content=self.system_prompt),
+            HumanMessage(content=f"用户输入: {user_input}\n\n请解析求职意向，以JSON格式输出。"),
+        ]
+
+    def _parse_final_output(self, messages: list[BaseMessage], state: JobAgentState) -> dict:
+        """Parse LLM output into structured intent."""
+        content = self._get_last_ai_content(messages)
+
+        if not content:
             return {
                 "current_phase": "intent",
                 "clarification_needed": True,
                 "clarification_question": "请告诉我您的求职意向，例如：地区、企业性质、岗位方向等。",
             }
 
-        # Try structured output first
+        # Try to parse JSON from LLM response
         try:
-            result = await self._parse_with_structured_output(user_input, state)
-            return result
-        except Exception:
-            # Fallback to JSON parsing
-            try:
-                result = await self._parse_with_json(user_input)
-                return result
-            except Exception:
-                return self._fallback_parse(user_input)
+            result = self._extract_json(content)
+            job_query = {
+                "region": result.get("region", []),
+                "company_type": result.get("company_type", []),
+                "direction": result.get("direction", ""),
+                "skills": result.get("skills", []),
+                "salary_min": result.get("salary_min"),
+                "salary_max": result.get("salary_max"),
+                "education": result.get("education"),
+            }
+            return {
+                "current_phase": "intent",
+                "job_query": job_query,
+                "clarification_needed": result.get("clarification_needed", False),
+                "clarification_question": result.get("clarification_question"),
+            }
+        except (json.JSONDecodeError, KeyError):
+            # Fallback: keyword extraction
+            return self._fallback_parse(content)
 
-    async def _parse_with_structured_output(self, user_input: str, state: JobAgentState) -> dict:
-        """Parse using LLM structured output."""
-        structured_llm = self._get_structured_llm(IntentOutput)
-
-        # Build context from conversation history
-        history_context = ""
-        messages = state.get("messages", [])
-        if len(messages) > 1:
-            history_context = "对话历史:\n" + "\n".join(
-                f"- {m.content}" for m in messages[:-1] if hasattr(m, "content")
-            )
-
-        prompt = f"""{history_context}
-
-用户最新输入: {user_input}
-
-请解析用户的求职意向。如果信息不足以进行搜索（缺少地区或岗位方向），设置 clarification_needed=true 并生成追问。"""
-
-        result: IntentOutput = await structured_llm.ainvoke(prompt)
-
-        job_query = {
-            "region": result.region,
-            "company_type": result.company_type,
-            "direction": result.direction,
-            "skills": result.skills,
-            "salary_min": result.salary_min,
-            "salary_max": result.salary_max,
-            "education": result.education,
-        }
-
-        return {
-            "current_phase": "intent",
-            "job_query": job_query,
-            "clarification_needed": result.clarification_needed,
-            "clarification_question": result.clarification_question,
-        }
-
-    async def _parse_with_json(self, user_input: str) -> dict:
-        """Fallback: parse using JSON response."""
-        llm = self._get_llm()
-        system_prompt, user_prompt = self._build_prompt(user_input)
-
-        response = await llm.ainvoke([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ])
-
-        result = self._parse_json_response(response.content)
-        return {
-            "current_phase": "intent",
-            "job_query": result.get("job_query"),
-            "clarification_needed": result.get("clarification_needed", False),
-            "clarification_question": result.get("clarification_question"),
-        }
-
-    def _build_prompt(self, user_input: str) -> tuple[str, str]:
-        from job_agent_os.prompts.loader import load_prompt
-        return load_prompt(self.prompt_key, {"user_input": user_input})
-
-    def _parse_json_response(self, content: str) -> dict[str, Any]:
-        try:
-            if "```json" in content:
-                json_str = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                json_str = content.split("```")[1].split("```")[0]
-            else:
-                json_str = content
-            return json.loads(json_str.strip())
-        except (json.JSONDecodeError, IndexError):
-            return {"job_query": None, "clarification_needed": True, "clarification_question": "抱歉，我无法理解您的需求，请重新描述。"}
+    def _extract_json(self, content: str) -> dict:
+        """Extract JSON from LLM response text."""
+        if "```json" in content:
+            json_str = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            json_str = content.split("```")[1].split("```")[0]
+        elif "{" in content:
+            json_str = content[content.index("{"):content.rindex("}") + 1]
+        else:
+            json_str = content
+        return json.loads(json_str.strip())
 
     def _fallback_parse(self, user_input: str) -> dict:
-        """Fallback parsing using simple keyword extraction."""
-        regions = ["河南", "郑州", "北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京"]
+        """Fallback parsing using simple keyword extraction (case-insensitive)."""
+        # NOTE: These keyword lists are hardcoded for common Chinese regions/directions.
+        # TODO: Expand coverage to more regions, company types, and job directions.
+        #       Consider loading from a config file or database for maintainability.
+        regions = ["河南", "郑州", "北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "洛阳", "开封"]
         company_types = ["国企", "央企", "民企", "外企", "事业单位", "上市公司"]
-        directions = ["Java", "Python", "前端", "后端", "算法", "测试", "运维", "数据", "Go", "C++"]
+        directions = ["Java", "Python", "前端", "后端", "算法", "测试", "运维", "数据", "Go", "C++", "AI", "大数据"]
+
+        input_lower = user_input.lower()
 
         job_query = {
             "region": [r for r in regions if r in user_input],
             "company_type": [c for c in company_types if c in user_input],
-            "direction": next((d for d in directions if d in user_input), ""),
+            "direction": next((d for d in directions if d.lower() in input_lower), ""),
             "skills": [],
             "salary_min": None,
             "salary_max": None,

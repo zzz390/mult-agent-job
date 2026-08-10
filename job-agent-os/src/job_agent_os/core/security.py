@@ -12,13 +12,17 @@ from job_agent_os.settings import get_settings
 
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt."""
-    password_bytes = password.encode("utf-8")[:72]  # bcrypt max 72 bytes
+    password_bytes = password.encode("utf-8")
+    if len(password_bytes) > 72:
+        raise ValueError("Password too long (max 72 bytes)")
     return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against its hash."""
-    password_bytes = plain_password.encode("utf-8")[:72]
+    password_bytes = plain_password.encode("utf-8")
+    if len(password_bytes) > 72:
+        raise ValueError("Password too long (max 72 bytes)")
     return bcrypt.checkpw(password_bytes, hashed_password.encode("utf-8"))
 
 

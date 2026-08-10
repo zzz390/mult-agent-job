@@ -15,8 +15,9 @@ async def upload_resume(
     file: UploadFile = File(...),
     title: str = Form(...),
     target_direction: str | None = Form(None),
-    user: CurrentUser = None,
-    db: DBSession = None,
+    *,
+    user: CurrentUser,
+    db: DBSession,
 ) -> dict:
     """Upload a new resume."""
     from job_agent_os.models.resume import Resume
@@ -42,9 +43,9 @@ async def upload_resume(
 
 @router.get("")
 async def list_resumes(
-    user: CurrentUser = None,
-    db: DBSession = None,
-    pagination: Pagination = None,
+    user: CurrentUser,
+    db: DBSession,
+    pagination: Pagination,
 ) -> dict:
     """List user's resumes."""
     from sqlalchemy import select, func
@@ -71,8 +72,8 @@ async def list_resumes(
 @router.get("/{resume_id}")
 async def get_resume(
     resume_id: UUID,
-    user: CurrentUser = None,
-    db: DBSession = None,
+    user: CurrentUser,
+    db: DBSession,
 ) -> dict:
     """Get resume details."""
     from sqlalchemy import select
@@ -93,8 +94,8 @@ async def get_resume(
 async def update_resume(
     resume_id: UUID,
     request: ResumeUpdate,
-    user: CurrentUser = None,
-    db: DBSession = None,
+    user: CurrentUser,
+    db: DBSession,
 ) -> dict:
     """Update resume."""
     from sqlalchemy import select
@@ -112,9 +113,6 @@ async def update_resume(
 
     # Handle is_active - deactivate other resumes
     if update_data.get("is_active"):
-        await db.execute(
-            select(Resume).where(Resume.user_id == user.id, Resume.id != resume_id)
-        )
         # Deactivate all other resumes for this user
         from sqlalchemy import update
         await db.execute(
@@ -134,8 +132,8 @@ async def update_resume(
 @router.delete("/{resume_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_resume(
     resume_id: UUID,
-    user: CurrentUser = None,
-    db: DBSession = None,
+    user: CurrentUser,
+    db: DBSession,
 ) -> None:
     """Delete resume."""
     from sqlalchemy import select
@@ -150,7 +148,4 @@ async def delete_resume(
         raise NotFoundException(message="Resume not found")
 
     await db.delete(resume)
-from fastapi import APIRouter
-
-router = APIRouter()
 

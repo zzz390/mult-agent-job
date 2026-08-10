@@ -22,6 +22,9 @@ from job_agent_os.schemas.application import (
 )
 from job_agent_os.schemas.common import PaginationParams
 
+# Allowed sort fields for safe dynamic sorting
+ALLOWED_SORT_FIELDS = {"created_at", "updated_at", "status", "priority", "applied_at", "match_score"}
+
 # Valid state transitions
 VALID_TRANSITIONS: dict[str, list[str]] = {
     "pending": ["applied", "rejected"],
@@ -98,8 +101,9 @@ class ApplicationService:
         total_result = await self.db.execute(count_query)
         total = total_result.scalar() or 0
 
-        # Sorting
-        sort_column = getattr(Application, pagination.sort_by, Application.created_at)
+        # Sorting (whitelist check for security)
+        sort_field = pagination.sort_by if pagination.sort_by in ALLOWED_SORT_FIELDS else "created_at"
+        sort_column = getattr(Application, sort_field, Application.created_at)
         if pagination.sort_order == "desc":
             query = query.order_by(sort_column.desc())
         else:
@@ -240,4 +244,3 @@ class ApplicationService:
             avg_match_score=round(avg_score, 2),
             stage_conversion={},
         )
-"""Application service."""

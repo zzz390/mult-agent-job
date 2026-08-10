@@ -16,6 +16,8 @@ class ToolCall(Base, UUIDMixin):
     __tablename__ = "tool_calls"
 
     agent_log_id: Mapped[UUID] = mapped_column(ForeignKey("agent_logs.id"), nullable=False)
+    # Note: session_id has no ForeignKey constraint because sessions may be
+    # stored in-memory (e.g. LangGraph checkpointer) rather than in a DB table.
     session_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
     tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
     tool_category: Mapped[str] = mapped_column(String(50), nullable=False)

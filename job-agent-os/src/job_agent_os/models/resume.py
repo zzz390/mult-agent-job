@@ -3,14 +3,15 @@
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from pgvector.sqlalchemy import Vector
 
 from job_agent_os.models.base import Base, TimestampMixin, UUIDMixin
 
 if TYPE_CHECKING:
+    from job_agent_os.models.application import Application
     from job_agent_os.models.user import User
 
 
@@ -35,3 +36,6 @@ class Resume(Base, UUIDMixin, TimestampMixin):
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="resumes")
+    applications: Mapped[list["Application"]] = relationship(
+        back_populates="resume", foreign_keys="[Application.resume_id]"
+    )

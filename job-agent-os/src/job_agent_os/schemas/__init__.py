@@ -101,4 +101,3 @@ __all__ = [
     "UserResponse",
     "UserUpdateRequest",
 ]
-"""Schemas package - Pydantic request/response models."""

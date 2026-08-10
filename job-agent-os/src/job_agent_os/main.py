@@ -10,6 +10,7 @@ from job_agent_os.api.response import success_response
 from job_agent_os.api.v1.router import api_router
 from job_agent_os.db.redis import close_redis, init_redis
 from job_agent_os.db.session import close_db, init_db
+from job_agent_os.memory.embeddings import get_embedding_service
 from job_agent_os.settings import get_settings
 
 
@@ -28,6 +29,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown
     await close_redis()
     await close_db()
+    # Close the embedding service HTTP client to release resources
+    embedding_service = get_embedding_service()
+    await embedding_service.close()
     print("Application shutdown complete")
 
 
@@ -60,4 +64,4 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("job_agent_os.main:app", reload=True, host="0.0.0.0", port=8001)
+    uvicorn.run("job_agent_os.main:app", reload=True, host="0.0.0.0", port=8000)

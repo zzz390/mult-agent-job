@@ -148,6 +148,7 @@ class PostgresMemoryStore(MemoryStore):
         if memory:
             memory.access_count += 1
             memory.last_accessed_at = datetime.now(UTC)
+            await self.db.flush()
         return memory
 
     async def get_memory_by_id(self, user_id: UUID, memory_id: UUID) -> Memory | None:

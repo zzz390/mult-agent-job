@@ -36,6 +36,7 @@ class SessionResponse(BaseModel):
 
     session_id: UUID
     status: str
+    intent: str | None = None
     current_phase: str | None = None
     progress: SessionProgress | None = None
     pending_approval: PendingApprovalInfo | None = None

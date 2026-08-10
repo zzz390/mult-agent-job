@@ -150,17 +150,44 @@ class RAGPipeline:
         return chunks
 
     def _split_text_into_chunks(self, text: str) -> list[str]:
-        """Split text into overlapping chunks."""
+        """Split text into overlapping chunks, preferring sentence boundaries.
+
+        When a chunk would exceed chunk_size, the algorithm attempts to break
+        at a sentence boundary (Chinese punctuation, English punctuation, or
+        newline) to avoid splitting sentences across chunks.
+        """
         if len(text) <= self.chunk_size:
             return [text] if text.strip() else []
+
+        # Sentence boundary separators, ordered by preference
+        separators = ["\n", "。", "！", "？", ". ", "! ", "? "]
 
         chunks: list[str] = []
         start = 0
         while start < len(text):
             end = start + self.chunk_size
+            if end < len(text):
+                # Try to break at a sentence boundary within the chunk
+                for sep in separators:
+                    boundary = text.rfind(sep, start, end)
+                    if boundary > start + self.chunk_size // 2:
+                        end = boundary + len(sep)
+                        break
+            else:
+                end = len(text)
+
             chunk = text[start:end]
             if chunk.strip():
                 chunks.append(chunk.strip())
-            start += self.chunk_size - self.chunk_overlap
+
+            # Stop if we've reached the end of the text
+            if end >= len(text):
+                break
+
+            # Advance with overlap, ensuring forward progress
+            step = end - start - self.chunk_overlap
+            if step <= 0:
+                step = 1
+            start += step
 
         return chunks

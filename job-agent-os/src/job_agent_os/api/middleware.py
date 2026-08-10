@@ -10,6 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from job_agent_os.core.exceptions import AppException
 from job_agent_os.core.utils import generate_uuid, utc_now
+from job_agent_os.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +66,10 @@ def setup_exception_handlers(app: FastAPI) -> None:
 
 def setup_cors(app: FastAPI) -> None:
     """Setup CORS middleware."""
+    settings = get_settings()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -79,4 +81,3 @@ def setup_middleware(app: FastAPI) -> None:
     app.add_middleware(RequestLoggingMiddleware)
     setup_cors(app)
     setup_exception_handlers(app)
-"""Middleware (CORS, request logging, exception handling)."""

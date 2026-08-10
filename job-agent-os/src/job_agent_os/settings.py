@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     # Embedding (Alibaba DashScope / OpenAI compatible)
     embedding_api_key: SecretStr = SecretStr("")
     embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    embedding_model: str = "qwen3.7-text-embedding"
+    embedding_model: str = "text-embedding-v3"
     embedding_dimension: int = 1024
 
     # Langfuse
@@ -132,6 +132,21 @@ class Settings(BaseSettings):
     harness_tool_timeout_seconds: int = 30
     harness_max_retries: int = 3
     harness_loop_detection_threshold: int = 3
+
+    # CORS
+    cors_origins: list[str] = ["http://localhost:3000"]
+
+    @model_validator(mode="after")
+    def validate_security(self) -> "Settings":
+        """Validate security settings in production."""
+        if self.env == "prod" and (
+            self.jwt_secret_key.get_secret_value()
+            == "your-super-secret-key-change-in-production"
+        ):
+            raise ValueError(
+                "jwt_secret_key must be changed from default value in production"
+            )
+        return self
 
     @property
     def app(self) -> AppConfig:
@@ -208,5 +223,10 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Get cached settings instance."""
+    """Get cached settings instance.
+
+    Note: The result is cached by lru_cache. To force a refresh
+    (e.g. after changing environment variables in tests), call
+    get_settings.cache_clear() first.
+    """
     return Settings()

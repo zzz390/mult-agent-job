@@ -1,51 +1,107 @@
-"""Parse Agent - Parse job descriptions using LLM structuring."""
+"""Parse Agent - Structure raw job descriptions using LLM (ReAct mode)."""
 
-import asyncio
+import json
+
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from job_agent_os.agents.base import BaseAgent
 from job_agent_os.graph.state import JobAgentState
-from job_agent_os.tools.parse.html_parser import fetch_and_extract_html
-from job_agent_os.tools.parse.jd_structurer import structure_jd
+
+PARSE_SYSTEM_PROMPT = """你是JD（岗位描述）结构化解析专家。你的任务是将原始岗位数据结构化为标准格式。
+
+你可以使用以下工具：
+1. jd_structurer - 使用LLM将原始岗位描述文本结构化为标准JD格式（含技能、学历、职责等）
+2. html_parser - 如果岗位有source_url但缺少描述，可抓取网页获取完整JD文本
+
+工作策略：
+1. 对每个搜索结果中的岗位，检查是否有足够的 raw_description
+2. 如果缺少描述但有 source_url，先用 html_parser 抓取
+3. 对每个岗位调用 jd_structurer 进行结构化
+4. 只保留 parse_confidence >= 0.6 的结果
+
+最终输出：将结构化后的岗位以JSON数组格式输出。每个岗位应包含：
+title, company, location, salary, skills_required, education, responsibilities, parse_confidence"""
 
 
 class ParseAgent(BaseAgent):
-    """Parse Agent extracts structured information from job descriptions.
-
-    Uses LLM to structure raw JD text into ParsedJD format.
-    Batch concurrent parsing with asyncio.Semaphore.
-    confidence < 0.6 marks as failed.
-    """
+    """Parse Agent structures raw job data into standard JD format (ReAct)."""
 
     name = "parse"
-    required_tools = ["html_parser", "jd_structurer"]
-    prompt_key = "structure_jd"
+    system_prompt = PARSE_SYSTEM_PROMPT
+    agent_tools = ["jd_structurer", "html_parser"]
+    max_iterations = 6
 
-    async def execute(self, state: JobAgentState) -> dict:
-        """Parse search results into structured JDs."""
+    def _build_initial_messages(self, state: JobAgentState) -> list[BaseMessage]:
+        """Build parse task from search_results."""
         search_results = state.get("search_results", [])
+        task = self._get_task_instruction(state)
 
-        if not search_results:
-            return {
-                "current_phase": "parse",
-                "parsed_jobs": [],
-                "parse_failures": [],
-            }
+        # Limit to avoid overly long prompts
+        jobs_to_parse = search_results[:15]
+        jobs_summary = json.dumps(jobs_to_parse, ensure_ascii=False, default=str)
 
-        # Batch concurrent parsing with semaphore
-        semaphore = asyncio.Semaphore(5)  # Max 5 concurrent
-        tasks = [self._parse_single_job(job, semaphore) for job in search_results]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        content = f"请将以下 {len(jobs_to_parse)} 个原始岗位数据结构化为标准JD格式：\n{jobs_summary}"
+        if task:
+            content += f"\n\nSupervisor 补充指令：{task}"
 
-        parsed_jobs = []
-        parse_failures = []
+        return [
+            SystemMessage(content=self.system_prompt),
+            HumanMessage(content=content),
+        ]
 
-        for job, result in zip(search_results, results):
-            if isinstance(result, Exception):
-                parse_failures.append(job.get("source_url", "unknown"))
-            elif result and result.get("parse_confidence", 0) >= 0.6:
-                parsed_jobs.append(result)
-            else:
-                parse_failures.append(job.get("source_url", "unknown"))
+    def _parse_final_output(self, messages: list[BaseMessage], state: JobAgentState) -> dict:
+        """Extract parsed jobs from tool outputs and AI response."""
+        parsed_jobs: list[dict] = []
+        parse_failures: list[str] = []
+
+        # Collect from jd_structurer tool messages
+        for msg in messages:
+            if not isinstance(msg, ToolMessage):
+                continue
+            try:
+                data = json.loads(msg.content)
+                if isinstance(data, dict) and data.get("title"):
+                    if data.get("parse_confidence", 0) >= 0.6:
+                        parsed_jobs.append(data)
+                    else:
+                        parse_failures.append(data.get("source_url", "unknown"))
+                elif isinstance(data, dict) and "error" in data:
+                    parse_failures.append("tool_error")
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        # Fallback: parse from AI final message
+        if not parsed_jobs:
+            content = self._get_last_ai_content(messages)
+            if content:
+                try:
+                    if "[" in content:
+                        json_str = content[content.index("["):content.rindex("]") + 1]
+                        parsed = json.loads(json_str)
+                        if isinstance(parsed, list):
+                            parsed_jobs = [j for j in parsed if isinstance(j, dict) and j.get("title")]
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+        # If still nothing, pass through search_results as-is (basic structure)
+        if not parsed_jobs:
+            search_results = state.get("search_results", [])
+            parsed_jobs = [
+                {
+                    "title": j.get("title", ""),
+                    "company": j.get("company", ""),
+                    "location": j.get("location"),
+                    "salary": j.get("salary"),
+                    "skills_required": j.get("skills_required", []),
+                    "education": j.get("education"),
+                    "source_url": j.get("source_url", ""),
+                    "source_platform": j.get("source_platform", ""),
+                    "parse_confidence": 0.3,  # Low confidence — below 0.6 threshold
+                    "parse_note": "fallback_unparsed",
+                }
+                for j in search_results
+                if j.get("title")
+            ]
 
         return {
             "current_phase": "parse",
@@ -53,26 +109,6 @@ class ParseAgent(BaseAgent):
             "parse_failures": parse_failures,
         }
 
-    async def _parse_single_job(self, job: dict, semaphore: asyncio.Semaphore) -> dict:
-        """Parse a single job with concurrency control."""
-        async with semaphore:
-            # Try to fetch full description if URL available
-            raw_description = job.get("raw_description", "")
-            source_url = job.get("source_url", "")
 
-            if not raw_description and source_url:
-                raw_description = await fetch_and_extract_html(source_url)
-
-            # Structure the JD using LLM
-            structured = await structure_jd(
-                title=job.get("title", ""),
-                company=job.get("company", ""),
-                raw_description=raw_description,
-                source_platform=job.get("source_platform", ""),
-                source_url=source_url,
-            )
-
-            return structured
-
-
+# Singleton instance
 parse_agent = ParseAgent()

@@ -32,8 +32,8 @@ class AuthService:
         email: str,
         password: str,
         phone: str | None = None,
-    ) -> User:
-        """Register a new user."""
+    ) -> tuple[User, TokenResponse]:
+        """Register a new user and return tokens directly."""
         # Check if email already exists
         result = await self.db.execute(select(User).where(User.email == email))
         if result.scalar_one_or_none():
@@ -60,7 +60,10 @@ class AuthService:
         self.db.add(user)
         await self.db.flush()
         await self.db.refresh(user)
-        return user
+
+        # Generate tokens directly (avoid extra login query)
+        token_response = self._generate_tokens(user)
+        return user, token_response
 
     async def login(self, email: str, password: str) -> tuple[User, TokenResponse]:
         """Login user and return tokens."""

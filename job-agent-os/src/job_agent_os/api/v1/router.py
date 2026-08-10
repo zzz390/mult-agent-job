@@ -32,4 +32,3 @@ api_router.include_router(memory.router, prefix="/memory", tags=["Memory"])
 api_router.include_router(evaluations.router, prefix="/evaluations", tags=["Evaluations"])
 api_router.include_router(monitoring.router, prefix="/monitoring", tags=["Monitoring"])
 api_router.include_router(prompts.router, prefix="/prompts", tags=["Prompts"])
-"""V1 router registration."""

@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from job_agent_os.memory.embeddings import EmbeddingService, get_embedding_service
@@ -71,7 +71,7 @@ class PgVectorStore(VectorStore):
         embeddings = await self.embedding_service.embed_batch(texts)
 
         doc_ids: list[str] = []
-        for doc, embedding in zip(documents, embeddings):
+        for doc, embedding in zip(documents, embeddings, strict=False):
             memory = Memory(
                 user_id=user_id,
                 memory_type="rag_chunk",
@@ -114,7 +114,7 @@ class PgVectorStore(VectorStore):
                 Memory.is_active == True,  # noqa: E712
                 Memory.embedding.isnot(None),
             )
-            .order_by(text("similarity DESC"))
+            .order_by(literal_column("similarity").desc())
             .limit(top_k)
         )
 

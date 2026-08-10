@@ -24,6 +24,8 @@ class Application(Base, UUIDMixin, TimestampMixin):
 
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id"), nullable=False)
+    # Note: resume_id should be validated at the service layer to ensure
+    # the resume belongs to the same user as the application.
     resume_id: Mapped[UUID] = mapped_column(ForeignKey("resumes.id"), nullable=False)
     optimized_resume_id: Mapped[UUID | None] = mapped_column(ForeignKey("resumes.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="pending")
@@ -41,5 +43,7 @@ class Application(Base, UUIDMixin, TimestampMixin):
     # Relationships
     user: Mapped["User"] = relationship(back_populates="applications")
     job: Mapped["Job"] = relationship(back_populates="applications")
-    resume: Mapped["Resume"] = relationship(foreign_keys=[resume_id])
+    resume: Mapped["Resume"] = relationship(
+        foreign_keys=[resume_id], back_populates="applications"
+    )
     optimized_resume: Mapped["Resume | None"] = relationship(foreign_keys=[optimized_resume_id])

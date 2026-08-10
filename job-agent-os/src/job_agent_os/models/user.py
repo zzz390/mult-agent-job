@@ -33,6 +33,8 @@ class User(Base, UUIDMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), default="active")
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Relationships
-    resumes: Mapped[list["Resume"]] = relationship(back_populates="user", lazy="selectin")
-    applications: Mapped[list["Application"]] = relationship(back_populates="user", lazy="selectin")
+    # Relationships - use lazy="noload" to avoid N+1 query problems when
+    # loading User objects without needing related resumes/applications.
+    # Callers can explicitly request these via selectinload when needed.
+    resumes: Mapped[list["Resume"]] = relationship(back_populates="user", lazy="noload")
+    applications: Mapped[list["Application"]] = relationship(back_populates="user", lazy="noload")

@@ -1,8 +1,10 @@
 """Session service (Agent session management)."""
 
 import asyncio
+import logging
 from uuid import UUID
 
+from langchain_core.messages import HumanMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,8 +21,13 @@ from job_agent_os.schemas.session import (
     SessionResponse,
 )
 
+logger = logging.getLogger(__name__)
+
 # In-memory session store (would be Redis in production)
 _sessions: dict[str, dict] = {}
+
+# Keep references to background tasks to prevent garbage collection
+_background_tasks: set[asyncio.Task] = set()
 
 
 class SessionService:
@@ -32,14 +39,13 @@ class SessionService:
     async def create_session(self, user: User, data: SessionCreate) -> SessionResponse:
         """Create a new agent session and start execution."""
         session_id = generate_uuid_obj()
-        runtime = get_harness_runtime()
 
-        # Build initial state
+        # Build initial state — inject user's intent as the first message
         initial_state: JobAgentState = {
             "session_id": str(session_id),
             "user_id": str(user.id),
-            "current_phase": "intent",
-            "messages": [],
+            "current_phase": "supervisor",
+            "messages": [HumanMessage(content=data.intent)],
             "job_query": None,
             "clarification_needed": False,
             "clarification_question": None,
@@ -57,8 +63,16 @@ class SessionService:
             "interview_questions": [],
             "applications": [],
             "kanban_state": {},
+            # Supervisor fields
+            "next_agent": "",
+            "task_instruction": "",
+            "supervisor_reasoning": "",
+            "is_finished": False,
+            "agent_execution_order": [],
+            # HITL
             "pending_approval": None,
             "human_feedback": None,
+            # Harness
             "execution_log": [],
             "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost_usd": 0.0},
             "error_state": None,
@@ -72,11 +86,11 @@ class SessionService:
             "status": "running",
             "mode": data.mode,
             "intent": data.intent,
-            "current_phase": "intent",
+            "current_phase": "supervisor",
             "progress": {
                 "completed_steps": [],
-                "current_step": "intent",
-                "pending_steps": ["search", "parse", "match", "resume", "interview", "tracker"],
+                "current_step": "supervisor",
+                "pending_steps": [],
             },
             "pending_approval": None,
             "results_summary": {},
@@ -87,7 +101,9 @@ class SessionService:
         _sessions[str(session_id)] = session_info
 
         # Start execution in background
-        asyncio.create_task(self._execute_session(str(session_id), initial_state, data))
+        task = asyncio.create_task(self._execute_session(str(session_id), initial_state, data))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
         return SessionResponse(
             session_id=session_id,
@@ -101,7 +117,7 @@ class SessionService:
     async def _execute_session(
         self, session_id: str, initial_state: JobAgentState, data: SessionCreate
     ) -> None:
-        """Execute the session graph in background."""
+        """Execute the Supervisor-loop graph in background."""
         from job_agent_os.graph.main_graph import get_main_graph
 
         runtime = get_harness_runtime()
@@ -110,24 +126,71 @@ class SessionService:
             config = {"configurable": {"thread_id": session_id}}
             result = await runtime.execute(graph, initial_state, config)
 
-            # Update session with results
+            # Graph completed (Supervisor set is_finished=true)
             if session_id in _sessions:
+                execution_order = result.get("agent_execution_order", [])
                 _sessions[session_id]["status"] = "completed"
                 _sessions[session_id]["current_phase"] = "done"
                 _sessions[session_id]["updated_at"] = utc_now().isoformat()
                 _sessions[session_id]["results_summary"] = {
                     "match_results_count": len(result.get("match_results", [])),
                     "applications_count": len(result.get("applications", [])),
+                    "recommendations": result.get("match_results", []),
+                    "agent_execution_order": execution_order,
                 }
                 _sessions[session_id]["token_usage"] = dict(result.get("token_usage", {}))
                 _sessions[session_id]["progress"] = {
-                    "completed_steps": ["intent", "search", "parse", "match", "resume", "interview", "tracker"],
+                    "completed_steps": execution_order,
                     "current_step": None,
                     "pending_steps": [],
                 }
         except Exception as e:
+            logger.exception("Session execution failed")
             if session_id in _sessions:
-                _sessions[session_id]["status"] = "error"
+                _sessions[session_id]["status"] = "failed"
+                _sessions[session_id]["updated_at"] = utc_now().isoformat()
+                _sessions[session_id]["results_summary"] = {"error": str(e)}
+
+    async def resume_session(self, session_id: str) -> None:
+        """Resume session execution after human approval.
+
+        Uses the graph's checkpoint to continue from where it paused.
+        Creates an independent DB session so the background task is not
+        tied to the request-scoped session.
+        """
+        from job_agent_os.graph.main_graph import get_main_graph
+
+        try:
+            graph = get_main_graph()
+            config = {
+                "configurable": {"thread_id": session_id},
+                "recursion_limit": 100,
+            }
+
+            # Resume from checkpoint with no new input
+            result = await graph.ainvoke(None, config)
+
+            if session_id in _sessions:
+                execution_order = result.get("agent_execution_order", [])
+                _sessions[session_id]["status"] = "completed"
+                _sessions[session_id]["current_phase"] = "done"
+                _sessions[session_id]["updated_at"] = utc_now().isoformat()
+                _sessions[session_id]["results_summary"] = {
+                    "match_results_count": len(result.get("match_results", [])),
+                    "applications_count": len(result.get("applications", [])),
+                    "recommendations": result.get("match_results", []),
+                    "agent_execution_order": execution_order,
+                }
+                _sessions[session_id]["token_usage"] = dict(result.get("token_usage", {}))
+                _sessions[session_id]["progress"] = {
+                    "completed_steps": execution_order,
+                    "current_step": None,
+                    "pending_steps": [],
+                }
+        except Exception as e:
+            logger.exception("Session resume failed")
+            if session_id in _sessions:
+                _sessions[session_id]["status"] = "failed"
                 _sessions[session_id]["updated_at"] = utc_now().isoformat()
                 _sessions[session_id]["results_summary"] = {"error": str(e)}
 
@@ -140,6 +203,7 @@ class SessionService:
                     SessionResponse(
                         session_id=UUID(sid),
                         status=info["status"],
+                        intent=info.get("intent"),
                         current_phase=info.get("current_phase"),
                         progress=info.get("progress"),
                         pending_approval=info.get("pending_approval"),
@@ -164,6 +228,7 @@ class SessionService:
         return SessionResponse(
             session_id=session_id,
             status=info["status"],
+            intent=info.get("intent"),
             current_phase=info.get("current_phase"),
             progress=info.get("progress"),
             pending_approval=info.get("pending_approval"),
@@ -189,8 +254,6 @@ class SessionService:
                 code=ErrorCode.SESSION_ENDED,
             )
 
-        # In a full implementation, this would inject the message into the graph
-        # via checkpointer and resume execution
         return {
             "message_id": str(generate_uuid_obj()),
             "response": "Message received. Processing...",
@@ -267,7 +330,7 @@ class SessionService:
 
         if info["status"] == "completed":
             timeline.append({"event": "session_completed", "timestamp": info.get("updated_at"), "data": info.get("results_summary", {})})
-        elif info["status"] == "error":
+        elif info["status"] == "failed":
             timeline.append({"event": "session_error", "timestamp": info.get("updated_at"), "data": info.get("results_summary", {})})
 
         return timeline
@@ -280,7 +343,6 @@ class SessionService:
                 message="Session not found",
                 code=ErrorCode.SESSION_NOT_FOUND,
             )
-        # In full implementation, this would query match_results from the graph state
         return info.get("results_summary", {}).get("recommendations", [])
 
     async def submit_recommendation_feedback(
@@ -295,4 +357,3 @@ class SessionService:
             )
         # Store feedback (in full implementation, would update graph state)
         return {"status": "feedback_received", "session_id": str(session_id)}
-"""Session service (Agent session management)."""

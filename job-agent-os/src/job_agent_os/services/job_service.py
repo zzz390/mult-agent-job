@@ -10,8 +10,12 @@ from job_agent_os.core.error_codes import ErrorCode
 from job_agent_os.core.exceptions import ConflictException, NotFoundException
 from job_agent_os.core.utils import utc_now
 from job_agent_os.models.job import Job
+from job_agent_os.models.user import User
 from job_agent_os.schemas.common import PaginationParams
-from job_agent_os.schemas.job import JobResponse, ManualJobCreate
+from job_agent_os.schemas.job import ManualJobCreate
+
+# Allowed sort fields for safe dynamic sorting
+ALLOWED_SORT_FIELDS = {"created_at", "updated_at", "title", "company", "location", "status", "source_platform", "salary_min", "salary_max", "crawled_at"}
 
 
 class JobService:
@@ -54,8 +58,9 @@ class JobService:
         total_result = await self.db.execute(count_query)
         total = total_result.scalar() or 0
 
-        # Apply sorting
-        sort_column = getattr(Job, pagination.sort_by, Job.created_at)
+        # Apply sorting (whitelist check for security)
+        sort_field = pagination.sort_by if pagination.sort_by in ALLOWED_SORT_FIELDS else "created_at"
+        sort_column = getattr(Job, sort_field, Job.created_at)
         if pagination.sort_order == "desc":
             query = query.order_by(sort_column.desc())
         else:
@@ -94,7 +99,6 @@ class JobService:
         if existing.scalar_one_or_none():
             raise ConflictException(
                 message="Duplicate job entry",
-                code=ErrorCode.JOB_NOT_FOUND,
             )
 
         job = Job(
@@ -119,13 +123,30 @@ class JobService:
         await self.db.refresh(job)
         return job
 
-    async def trigger_search(self, query_text: str | None, structured_query: dict | None, platforms: list[str] | None) -> UUID:
-        """Trigger an async job search, returns session_id for tracking."""
-        from job_agent_os.core.utils import generate_uuid_obj
+    async def trigger_search(
+        self, user: User, query_text: str | None, structured_query: dict | None, platforms: list[str] | None
+    ) -> UUID:
+        """Trigger an async job search via the session/graph system."""
+        from job_agent_os.schemas.session import SessionCreate
+        from job_agent_os.services.session_service import SessionService
 
-        session_id = generate_uuid_obj()
-        # The actual search will be handled by the session/graph system.
-        # Here we just return a session_id that the client can poll.
-        # In a full implementation, this would enqueue a background task.
-        return session_id
-"""Job service."""
+        # Build intent text from structured query if no free-text provided
+        intent = query_text or ""
+        if not intent and structured_query:
+            parts = []
+            if structured_query.get("region"):
+                parts.extend(structured_query["region"])
+            if structured_query.get("company_type"):
+                parts.extend(structured_query["company_type"])
+            if structured_query.get("direction"):
+                parts.append(structured_query["direction"])
+            if structured_query.get("skills"):
+                parts.extend(structured_query["skills"])
+            intent = " ".join(parts) if parts else "搜索岗位"
+
+        session_service = SessionService(self.db)
+        session = await session_service.create_session(
+            user,
+            SessionCreate(intent=intent, mode="search_only"),
+        )
+        return session.session_id

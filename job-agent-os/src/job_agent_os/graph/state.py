@@ -1,5 +1,6 @@
 """Global State definition (TypedDict)."""
 
+import operator
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -44,37 +45,44 @@ class JobAgentState(TypedDict, total=False):
     clarification_question: str | None
 
     # === Search Agent Output ===
-    search_results: list[dict]  # Raw search results
-    search_errors: list[dict]  # Platform errors
-    platforms_searched: list[str]
+    search_results: Annotated[list[dict], operator.add]  # Raw search results
+    search_errors: Annotated[list[dict], operator.add]  # Platform errors
+    platforms_searched: Annotated[list[str], operator.add]
 
     # === Parse Agent Output ===
-    parsed_jobs: list[dict]  # Structured JD list (ParsedJD schema)
-    parse_failures: list[str]  # Failed URLs
+    parsed_jobs: Annotated[list[dict], operator.add]  # Structured JD list (ParsedJD schema)
+    parse_failures: Annotated[list[str], operator.add]  # Failed URLs
 
     # === Match Agent Output ===
-    match_results: list[dict]  # Sorted match results (MatchScore schema)
+    match_results: Annotated[list[dict], operator.add]  # Sorted match results (MatchScore schema)
     user_profile: dict | None  # User resume profile
     match_threshold: float
 
     # === Resume Agent Output ===
     optimized_resume: dict | None
-    resume_diff: list[dict]
+    resume_diff: Annotated[list[dict], operator.add]
     resume_approved: bool
 
     # === Interview Agent Output ===
-    interview_questions: list[dict]
+    interview_questions: Annotated[list[dict], operator.add]
 
     # === Tracker Agent Output ===
-    applications: list[dict]
+    applications: Annotated[list[dict], operator.add]
     kanban_state: dict[str, list]
+
+    # === Supervisor Decision ===
+    next_agent: str  # Supervisor 决定的下一个 Agent
+    task_instruction: str  # 给 Agent 的任务指令
+    supervisor_reasoning: str  # Supervisor 的推理过程
+    is_finished: bool  # 整体任务是否完成
+    agent_execution_order: Annotated[list[str], operator.add]  # 记录 Agent 调用顺序（可观测性）
 
     # === Human-in-the-Loop ===
     pending_approval: dict | None
     human_feedback: str | None
 
     # === Harness Metadata ===
-    execution_log: list[dict]
+    execution_log: Annotated[list[dict], operator.add]
     token_usage: TokenUsage
     error_state: ErrorInfo | None
     retry_count: int

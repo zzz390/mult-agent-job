@@ -17,6 +17,8 @@ class HumanApproval(Base, UUIDMixin, TimestampMixin):
 
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     agent_log_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_logs.id"), nullable=True)
+    # Note: session_id has no ForeignKey constraint because sessions may be
+    # stored in-memory (e.g. LangGraph checkpointer) rather than in a DB table.
     session_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
     approval_type: Mapped[str] = mapped_column(String(50), nullable=False)
     title: Mapped[str] = mapped_column(String(300), nullable=False)

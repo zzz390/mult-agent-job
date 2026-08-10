@@ -1,65 +1,47 @@
-"""Integration tests for main graph flow (end-to-end)."""
+"""Integration tests for Supervisor-loop graph flow."""
 
 from unittest.mock import AsyncMock, patch
 
 from langchain_core.messages import HumanMessage
 
-from job_agent_os.graph.edges import (
-    after_human_clarify,
-    after_human_review,
-    after_resume_approval,
-    should_clarify,
-)
+from job_agent_os.graph.edges import route_from_supervisor
 from job_agent_os.graph.state import JobAgentState
 
 
-class TestConditionalEdges:
-    """Test conditional edge routing functions."""
+class TestSupervisorRouting:
+    """Test Supervisor routing edge function."""
 
-    def test_should_clarify_true(self):
-        """Should route to human_clarify when clarification needed."""
-        state: JobAgentState = {"clarification_needed": True}
-        assert should_clarify(state) == "human_clarify"
+    def test_route_to_intent(self):
+        """Should route to intent when next_agent is intent."""
+        state: JobAgentState = {"next_agent": "intent", "is_finished": False}
+        assert route_from_supervisor(state) == "intent"
 
-    def test_should_clarify_false(self):
-        """Should route to search when no clarification needed."""
-        state: JobAgentState = {"clarification_needed": False}
-        assert should_clarify(state) == "search"
+    def test_route_to_search(self):
+        """Should route to search when next_agent is search."""
+        state: JobAgentState = {"next_agent": "search", "is_finished": False}
+        assert route_from_supervisor(state) == "search"
 
-    def test_should_clarify_default(self):
-        """Should default to search when field missing."""
-        state: JobAgentState = {}
-        assert should_clarify(state) == "search"
+    def test_route_to_end_when_finished(self):
+        """Should route to __end__ when is_finished is True."""
+        state: JobAgentState = {"next_agent": "search", "is_finished": True}
+        assert route_from_supervisor(state) == "__end__"
 
-    def test_after_human_clarify_returns_intent(self):
-        """After clarification, should go back to intent."""
-        state: JobAgentState = {}
-        assert after_human_clarify(state) == "intent"
+    def test_route_to_end_when_no_agent(self):
+        """Should route to __end__ when next_agent is empty."""
+        state: JobAgentState = {"next_agent": "", "is_finished": False}
+        assert route_from_supervisor(state) == "__end__"
 
-    def test_after_human_review_accept(self):
-        """Should go to resume when review accepted."""
-        state: JobAgentState = {"human_feedback": "looks good"}
-        assert after_human_review(state) == "resume"
+    def test_route_to_end_for_invalid_agent(self):
+        """Should route to __end__ for unknown agent names."""
+        state: JobAgentState = {"next_agent": "nonexistent_agent", "is_finished": False}
+        assert route_from_supervisor(state) == "__end__"
 
-    def test_after_human_review_reject(self):
-        """Should go back to match when review rejected."""
-        state: JobAgentState = {"human_feedback": "reject these results"}
-        assert after_human_review(state) == "match"
-
-    def test_after_human_review_empty_feedback(self):
-        """Should go to resume when no feedback."""
-        state: JobAgentState = {"human_feedback": ""}
-        assert after_human_review(state) == "resume"
-
-    def test_after_resume_approval_approved(self):
-        """Should go to interview when resume approved."""
-        state: JobAgentState = {"resume_approved": True}
-        assert after_resume_approval(state) == "interview"
-
-    def test_after_resume_approval_rejected(self):
-        """Should go back to resume when not approved."""
-        state: JobAgentState = {"resume_approved": False}
-        assert after_resume_approval(state) == "resume"
+    def test_route_to_all_valid_agents(self):
+        """Should correctly route to all valid specialist agents."""
+        valid_agents = ["intent", "search", "web_search", "parse", "match", "resume", "interview", "tracker"]
+        for agent in valid_agents:
+            state: JobAgentState = {"next_agent": agent, "is_finished": False}
+            assert route_from_supervisor(state) == agent
 
 
 class TestGraphBuild:
@@ -72,111 +54,103 @@ class TestGraphBuild:
         graph = build_main_graph()
         assert graph is not None
 
-    def test_graph_has_expected_nodes(self):
-        """Graph should contain all expected nodes."""
+    def test_graph_has_supervisor_node(self):
+        """Graph should contain the supervisor node."""
         from job_agent_os.graph.main_graph import build_main_graph
 
         graph = build_main_graph()
-        # LangGraph compiled graph's get_graph().nodes is a dict
         graph_repr = graph.get_graph()
-        node_ids = list(graph_repr.nodes.keys()) if isinstance(graph_repr.nodes, dict) else list(graph_repr.nodes)
+        node_ids = list(graph_repr.nodes.keys())
+        assert "supervisor" in node_ids
+
+    def test_graph_has_all_specialist_nodes(self):
+        """Graph should contain all specialist agent nodes."""
+        from job_agent_os.graph.main_graph import build_main_graph
+
+        graph = build_main_graph()
+        graph_repr = graph.get_graph()
+        node_ids = list(graph_repr.nodes.keys())
 
         expected_nodes = [
+            "supervisor",
             "intent",
             "search",
+            "web_search",
             "parse",
             "match",
             "resume",
             "interview",
             "tracker",
-            "human_clarify",
-            "human_review",
-            "human_approve",
         ]
         for node_name in expected_nodes:
             assert node_name in node_ids, f"Node '{node_name}' not found in graph"
 
+    def test_graph_has_no_old_hitl_nodes(self):
+        """Graph should NOT contain old HITL nodes."""
+        from job_agent_os.graph.main_graph import build_main_graph
+
+        graph = build_main_graph()
+        graph_repr = graph.get_graph()
+        node_ids = list(graph_repr.nodes.keys())
+
+        old_nodes = ["human_clarify", "human_review", "human_approve"]
+        for node_name in old_nodes:
+            assert node_name not in node_ids, f"Old node '{node_name}' should not be in graph"
+
 
 class TestGraphExecution:
-    """Test graph execution with mocked agents."""
+    """Test graph execution with mocked Supervisor."""
 
-    async def test_intent_to_clarify_flow(self):
-        """Test flow: intent -> clarification needed -> human_clarify (interrupt)."""
+    async def test_supervisor_routes_to_intent_then_ends(self):
+        """Test: supervisor -> intent -> supervisor -> END."""
         from job_agent_os.graph.main_graph import build_main_graph
 
         graph = build_main_graph()
 
-        # Mock intent agent to require clarification
+        # Supervisor first routes to intent, then finishes
+        call_count = {"n": 0}
+
+        async def mock_supervisor_decide(state):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                from job_agent_os.agents.supervisor import SupervisorDecision
+                return SupervisorDecision(
+                    next_agent="intent",
+                    task_instruction="解析用户意图",
+                    reasoning="需要先解析意图",
+                    is_finished=False,
+                )
+            else:
+                from job_agent_os.agents.supervisor import SupervisorDecision
+                return SupervisorDecision(
+                    next_agent="__end__",
+                    task_instruction="",
+                    reasoning="任务完成",
+                    is_finished=True,
+                    final_message="完成",
+                )
+
         mock_intent_result = {
             "current_phase": "intent",
-            "clarification_needed": True,
-            "clarification_question": "请提供更多信息",
-        }
-
-        with patch("job_agent_os.graph.nodes.intent_agent") as mock_agent:
-            mock_agent.execute = AsyncMock(return_value=mock_intent_result)
-
-            config = {"configurable": {"thread_id": "test-thread-1"}}
-            initial_state = {
-                "messages": [HumanMessage(content="找工作")],
-            }
-
-            # Graph should interrupt before human_clarify
-            result = await graph.ainvoke(initial_state, config=config)
-
-            # Should have clarification data
-            assert result.get("clarification_needed") is True
-
-    async def test_full_happy_path_flow(self):
-        """Test full flow: intent -> search -> parse -> match -> (interrupt at human_review)."""
-        from job_agent_os.graph.main_graph import build_main_graph
-
-        graph = build_main_graph()
-
-        mock_intent = {
-            "current_phase": "intent",
-            "job_query": {"region": ["河南"], "direction": "Java", "company_type": ["国企"]},
+            "job_query": {"region": ["河南"], "direction": "Python"},
             "clarification_needed": False,
-            "clarification_question": None,
-        }
-        mock_search = {
-            "current_phase": "search",
-            "search_results": [{"title": "Java开发", "company": "中原银行"}],
-            "platforms_searched": ["boss"],
-        }
-        mock_parse = {
-            "current_phase": "parse",
-            "parsed_jobs": [{"title": "Java开发", "skills": ["Java", "Spring"]}],
-        }
-        mock_match = {
-            "current_phase": "match",
-            "match_results": [{"job_title": "Java开发", "score": 0.85}],
         }
 
         with (
+            patch("job_agent_os.graph.nodes.supervisor_agent") as m_sup,
             patch("job_agent_os.graph.nodes.intent_agent") as m_intent,
-            patch("job_agent_os.graph.nodes.search_agent") as m_search,
-            patch("job_agent_os.graph.nodes.parse_agent") as m_parse,
-            patch("job_agent_os.graph.nodes.match_agent") as m_match,
         ):
-            m_intent.execute = AsyncMock(return_value=mock_intent)
-            m_search.execute = AsyncMock(return_value=mock_search)
-            m_parse.execute = AsyncMock(return_value=mock_parse)
-            m_match.execute = AsyncMock(return_value=mock_match)
+            m_sup.decide = mock_supervisor_decide
+            m_intent.execute = AsyncMock(return_value=mock_intent_result)
 
-            config = {"configurable": {"thread_id": "test-thread-2"}}
+            config = {"configurable": {"thread_id": "test-supervisor-1"}}
             initial_state = {
-                "messages": [HumanMessage(content="河南 国企 Java")],
+                "messages": [HumanMessage(content="河南 国企 Python")],
             }
 
-            # Should interrupt before human_review
             result = await graph.ainvoke(initial_state, config=config)
 
-            # Verify agents were called
+            # Intent agent should have been called
             m_intent.execute.assert_called_once()
-            m_search.execute.assert_called_once()
-            m_parse.execute.assert_called_once()
-            m_match.execute.assert_called_once()
-
-            # Should have match results
-            assert result.get("match_results") is not None
+            # Should have job_query from intent
+            assert result.get("job_query") is not None

@@ -44,7 +44,18 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    """Get a database session (for FastAPI dependency injection)."""
+    """Get a database session (for FastAPI dependency injection).
+
+    This is a common FastAPI pattern where the session is auto-committed
+    after the endpoint handler returns successfully. If an exception is
+    raised, the session is rolled back. The session is always closed in
+    the finally block.
+
+    Note: The auto-commit after yield means any changes made during the
+    request will be committed automatically. This is intentional for
+    convenience but means handlers should be careful about unintended
+    side effects. For read-only operations, the commit is a no-op.
+    """
     session_factory = get_session_factory()
     async with session_factory() as session:
         try:

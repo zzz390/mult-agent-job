@@ -16,6 +16,8 @@ class AgentLog(Base, UUIDMixin, TimestampMixin):
 
     __tablename__ = "agent_logs"
 
+    # Note: session_id has no ForeignKey constraint because sessions may be
+    # stored in-memory (e.g. LangGraph checkpointer) rather than in a DB table.
     session_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     trace_id: Mapped[str | None] = mapped_column(String(100), nullable=True)

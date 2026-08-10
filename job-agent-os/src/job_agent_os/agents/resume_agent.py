@@ -1,97 +1,103 @@
-"""Resume Agent - Optimize resume for target jobs using LLM."""
+"""Resume Agent - Optimize resume for target jobs (ReAct mode)."""
+
+import json
+
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from job_agent_os.agents.base import BaseAgent
 from job_agent_os.graph.state import JobAgentState
-from job_agent_os.tools.resume.keyword_optimizer import optimize_resume_keywords
+
+RESUME_SYSTEM_PROMPT = """你是简历优化专家。你的任务是针对目标岗位优化用户简历。
+
+你可以使用以下工具：
+1. keyword_optimizer - 使用LLM针对目标岗位优化简历关键词和措辞，返回修改对比
+
+工作原则：
+- 不捏造经历，只优化措辞和关键词
+- 突出与目标岗位匹配的技能
+- 量化成果（如"提升性能30%"）
+- 生成修改对比（before/after/reason）
+
+最终输出：以JSON格式输出，包含：
+- optimized_resume: 优化后的简历文本
+- resume_diff: 修改对比列表 [{section, before, after, reason}]"""
 
 
 class ResumeAgent(BaseAgent):
-    """Resume Agent optimizes resume for target job descriptions.
-
-    Uses LLM to optimize wording (constraint: never fabricate experience).
-    Generates before/after/reason diff for each change.
-    """
+    """Resume Agent optimizes resume for target jobs (ReAct)."""
 
     name = "resume"
-    required_tools = ["keyword_optimizer"]
-    prompt_key = "optimize_resume"
+    system_prompt = RESUME_SYSTEM_PROMPT
+    agent_tools = ["keyword_optimizer"]
+    max_iterations = 3
 
-    async def execute(self, state: JobAgentState) -> dict:
-        """Optimize resume based on target JD."""
-        match_results = state.get("match_results", [])
+    def _build_initial_messages(self, state: JobAgentState) -> list[BaseMessage]:
+        """Build resume optimization task."""
         user_profile = state.get("user_profile") or {}
+        match_results = state.get("match_results", [])
+        task = self._get_task_instruction(state)
 
-        if not match_results:
-            return {
-                "current_phase": "resume",
-                "optimized_resume": None,
-                "resume_diff": [],
-            }
+        # Get target job description from top match
+        target_job = match_results[0].get("job", {}) if match_results else {}
+        job_desc = json.dumps(target_job, ensure_ascii=False, default=str)
 
-        # Get top job as target
-        top_job = match_results[0].get("job", {})
-        job_description = self._build_job_description(top_job)
-        resume_content = self._build_resume_text(user_profile)
+        # Build resume content from user profile
+        resume_content = json.dumps(user_profile, ensure_ascii=False) if user_profile else "暂无简历数据"
 
-        if not resume_content:
-            return {
-                "current_phase": "resume",
-                "optimized_resume": {"original": user_profile, "optimized": user_profile, "target_job": top_job.get("title", "")},
-                "resume_diff": [],
-                "resume_approved": False,
-            }
+        content = (
+            f"请针对以下目标岗位优化用户简历：\n\n"
+            f"## 目标岗位：\n{job_desc}\n\n"
+            f"## 用户简历：\n{resume_content}"
+        )
+        if task:
+            content += f"\n\nSupervisor 补充指令：{task}"
 
-        # Call LLM optimization tool
-        try:
-            result = await optimize_resume_keywords(
-                resume_content=resume_content,
-                job_description=job_description,
-            )
-            optimized_resume = {
-                "original": user_profile,
-                "optimized_text": result.get("optimized_resume", resume_content),
-                "target_job": top_job.get("title", ""),
-                "suggestions": result.get("suggestions", []),
-            }
-            resume_diff = result.get("resume_diff", [])
-        except Exception:
-            optimized_resume = {
-                "original": user_profile,
-                "optimized": user_profile,
-                "target_job": top_job.get("title", ""),
-            }
-            resume_diff = [{"section": "技能", "action": "reorder", "reason": "将匹配技能前置"}]
+        return [
+            SystemMessage(content=self.system_prompt),
+            HumanMessage(content=content),
+        ]
+
+    def _parse_final_output(self, messages: list[BaseMessage], state: JobAgentState) -> dict:
+        """Extract resume optimization results."""
+        optimized_resume = None
+        resume_diff: list[dict] = []
+
+        # Check tool outputs
+        for msg in messages:
+            if not isinstance(msg, ToolMessage):
+                continue
+            try:
+                data = json.loads(msg.content)
+                if isinstance(data, dict):
+                    if data.get("optimized_resume"):
+                        optimized_resume = data["optimized_resume"]
+                    if data.get("resume_diff"):
+                        resume_diff = data["resume_diff"]
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        # Fallback: parse from AI response
+        if not optimized_resume:
+            content = self._get_last_ai_content(messages)
+            if content:
+                try:
+                    if "{" in content:
+                        json_str = content[content.index("{"):content.rindex("}") + 1]
+                        data = json.loads(json_str)
+                        optimized_resume = data.get("optimized_resume", content)
+                        resume_diff = data.get("resume_diff", [])
+                except (json.JSONDecodeError, ValueError):
+                    optimized_resume = content
+
+        if not resume_diff:
+            resume_diff = [{"section": "整体", "before": "", "after": "已优化关键词匹配", "reason": "针对目标岗位调整"}]
 
         return {
             "current_phase": "resume",
-            "optimized_resume": optimized_resume,
+            "optimized_resume": optimized_resume if optimized_resume else None,
             "resume_diff": resume_diff,
-            "resume_approved": False,  # Requires human approval
         }
 
-    def _build_job_description(self, job: dict) -> str:
-        """Build a text description of the target job."""
-        parts = [f"岗位: {job.get('title', '')}", f"公司: {job.get('company', '')}"]
-        if job.get("skills_required"):
-            parts.append(f"技能要求: {', '.join(job['skills_required'])}")
-        if job.get("responsibilities"):
-            parts.append(f"岗位职责: {'; '.join(job['responsibilities'][:3])}")
-        return "\n".join(parts)
 
-    def _build_resume_text(self, user_profile: dict) -> str:
-        """Build resume text from user profile."""
-        if not user_profile:
-            return ""
-        parts = []
-        if user_profile.get("skills"):
-            parts.append(f"技能: {', '.join(user_profile['skills'])}")
-        if user_profile.get("education"):
-            parts.append(f"学历: {user_profile['education']}")
-        if user_profile.get("experience"):
-            parts.append(f"经历: {user_profile['experience']}")
-        if user_profile.get("projects"):
-            parts.append(f"项目: {user_profile['projects']}")
-        return "\n".join(parts) if parts else str(user_profile)
-
-
+# Singleton instance
 resume_agent = ResumeAgent()

@@ -59,6 +59,9 @@ class ResumeResponse(BaseModel):
     title: str
     version: str
     file_type: str | None = None
+    file_path: str | None = None
+    file_size_bytes: int | None = None
+    is_encrypted: bool = False
     structured_data: dict = Field(default_factory=dict)
     target_direction: str | None = None
     is_active: bool

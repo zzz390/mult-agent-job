@@ -30,8 +30,11 @@ async def get_current_user(
     if not authorization or not authorization.startswith("Bearer "):
         raise UnauthorizedException(message="Token not provided")
 
-    token = authorization.replace("Bearer ", "")
+    token = authorization.removeprefix("Bearer ").strip()
     payload = decode_token(token)
+
+    if payload.get("type") != "access":
+        raise UnauthorizedException(message="Invalid token type")
 
     user_id = payload.get("sub")
     if not user_id:

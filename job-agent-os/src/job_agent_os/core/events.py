@@ -93,4 +93,3 @@ class EventBus:
 
 # Global event bus instance
 event_bus = EventBus()
-"""Event bus (in-process pub/sub)."""

@@ -78,8 +78,14 @@ class TraceManager:
         model_name: str | None = None,
         status: str = "success",
         error_message: str | None = None,
+        error_type: str | None = None,
     ) -> dict:
         """Record node execution end.
+
+        Args:
+            error_type: Optional exception type name (e.g. ``ValueError``).
+                If not provided but ``error_message`` is set, falls back to
+                ``"Error"``.
 
         Returns:
             Complete log entry dict
@@ -90,6 +96,10 @@ class TraceManager:
 
         end_time = time.perf_counter()
         duration_ms = int((end_time - span["start_time"]) * 1000)
+
+        # Derive error_type from error_message only as a last resort
+        if error_message and not error_type:
+            error_type = "Error"
 
         tokens = token_usage or {}
         log_entry = {
@@ -109,7 +119,7 @@ class TraceManager:
             "cost_usd": tokens.get("cost_usd", 0.0),
             "duration_ms": duration_ms,
             "error_message": error_message,
-            "error_type": type(error_message).__name__ if error_message else None,
+            "error_type": error_type,
             "started_at": span["started_at"],
             "finished_at": datetime.now(UTC),
         }
@@ -123,6 +133,7 @@ class TraceManager:
             span_id=span_id,
             status="error",
             error_message=str(error),
+            error_type=type(error).__name__,
         )
 
     def get_logs(self) -> list[dict]:
@@ -147,8 +158,10 @@ class TraceManager:
             return 0
 
         count = 0
+        skipped: list[dict] = []
         for log in self._logs:
             if not log.get("session_id") or not log.get("user_id"):
+                skipped.append(log)
                 continue
 
             agent_log = AgentLog(
@@ -178,8 +191,8 @@ class TraceManager:
         if count > 0:
             await self.db.flush()
 
-        # Clear flushed logs
-        self._logs = []
+        # Clear only successfully written logs, retain skipped ones
+        self._logs = skipped
         return count
 
     def _safe_snapshot(self, data: Any) -> dict | None:

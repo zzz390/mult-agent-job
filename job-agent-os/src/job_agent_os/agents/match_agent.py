@@ -1,163 +1,109 @@
-"""Match Agent - Match jobs with user resume using rule filter + skill matcher + LLM scoring."""
+"""Match Agent - Score and rank jobs against user profile (ReAct mode)."""
 
 import json
 
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+
 from job_agent_os.agents.base import BaseAgent
 from job_agent_os.graph.state import JobAgentState
-from job_agent_os.tools.match.rule_filter import batch_rule_filter
-from job_agent_os.tools.match.skill_matcher import compute_skill_score, match_skills
+
+MATCH_SYSTEM_PROMPT = """你是岗位匹配评分专家。你的任务是对候选岗位进行评分和排序。
+
+你可以使用以下工具：
+1. rule_filter - 按硬性条件（学历、地区）过滤岗位列表
+2. skill_matcher - 将岗位技能要求与用户技能进行匹配，返回匹配/缺失列表
+
+工作流程：
+1. 先用 rule_filter 过滤不满足硬性条件的岗位
+2. 对通过过滤的岗位，用 skill_matcher 进行技能匹配
+3. 综合技能匹配度、学历匹配、地区匹配计算总分（满分100）
+4. 为每个岗位生成推荐理由和风险因素
+5. 按总分降序排列
+
+评分权重：技能匹配50% + 学历匹配20% + 经验匹配20% + 地区匹配10%
+
+最终输出：以JSON数组格式输出匹配结果，每项包含：
+job(岗位信息), overall_score, skill_match, education_match, matched_skills, missing_skills, recommendation_reason, risk_factors"""
 
 
 class MatchAgent(BaseAgent):
-    """Match Agent scores and ranks jobs based on user profile.
-
-    Pipeline:
-    1. Rule filter (hard constraints: education, location)
-    2. Skill matching (exact + fuzzy keyword matching)
-    3. LLM comprehensive scoring + recommendation reason generation
-    """
+    """Match Agent scores and ranks jobs against user profile (ReAct)."""
 
     name = "match"
-    required_tools = ["rule_filter", "skill_matcher"]
-    prompt_key = "score_and_rank"
+    system_prompt = MATCH_SYSTEM_PROMPT
+    agent_tools = ["rule_filter", "skill_matcher"]
+    max_iterations = 5
 
-    async def execute(self, state: JobAgentState) -> dict:
-        """Match parsed jobs with user profile."""
+    def _build_initial_messages(self, state: JobAgentState) -> list[BaseMessage]:
+        """Build match task from parsed_jobs and user_profile."""
         parsed_jobs = state.get("parsed_jobs", [])
         user_profile = state.get("user_profile") or {}
+        task = self._get_task_instruction(state)
 
-        if not parsed_jobs:
-            return {"current_phase": "match", "match_results": []}
+        jobs_summary = json.dumps(parsed_jobs[:10], ensure_ascii=False, default=str)
+        profile_summary = json.dumps(user_profile, ensure_ascii=False) if user_profile else "暂无用户简历信息"
 
-        # Step 1: Rule filter (hard constraints)
-        filtered_jobs = batch_rule_filter(parsed_jobs, user_profile)
+        content = (
+            f"请对以下 {len(parsed_jobs)} 个岗位进行匹配评分：\n\n"
+            f"## 候选岗位：\n{jobs_summary}\n\n"
+            f"## 用户画像：\n{profile_summary}"
+        )
+        if task:
+            content += f"\n\nSupervisor 补充指令：{task}"
 
-        # Step 2: Skill matching + scoring
-        user_skills = user_profile.get("skills", [])
-        match_results = []
+        return [
+            SystemMessage(content=self.system_prompt),
+            HumanMessage(content=content),
+        ]
 
-        for job in filtered_jobs:
-            job_skills = job.get("skills_required", [])
-            skill_result = match_skills(job_skills, user_skills)
-            skill_score = compute_skill_score(job_skills, user_skills)
+    def _parse_final_output(self, messages: list[BaseMessage], state: JobAgentState) -> dict:
+        """Extract match results from tool outputs and AI response."""
+        match_results: list[dict] = []
 
-            # Compute composite score
-            education_score = self._education_score(job, user_profile)
-            location_score = self._location_score(job, user_profile)
-            experience_score = 75.0  # Default, could be enhanced
-
-            overall_score = (
-                skill_score * 0.5
-                + education_score * 0.2
-                + experience_score * 0.2
-                + location_score * 0.1
-            )
-
-            match_results.append({
-                "job": job,
-                "overall_score": round(overall_score, 1),
-                "skill_match": skill_score,
-                "education_match": education_score,
-                "experience_match": experience_score,
-                "location_match": location_score,
-                "matched_skills": skill_result["matched_skills"],
-                "missing_skills": skill_result["missing_skills"],
-                "recommendation_reason": self._generate_reason(skill_result, job),
-                "risk_factors": self._identify_risks(skill_result, job, user_profile),
-            })
-
-        # Step 3: Try LLM scoring for top candidates
-        if match_results and user_profile:
+        # Try to parse from AI final message (LLM generates comprehensive scoring)
+        content = self._get_last_ai_content(messages)
+        if content:
             try:
-                match_results = await self._llm_rerank(match_results[:5], user_profile)
-            except Exception:
-                pass  # Keep rule-based scores if LLM fails
+                if "[" in content:
+                    json_str = content[content.index("["):content.rindex("]") + 1]
+                    parsed = json.loads(json_str)
+                    if isinstance(parsed, list):
+                        match_results = parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
 
-        # Sort by score descending
-        match_results.sort(key=lambda x: x["overall_score"], reverse=True)
+        # Fallback: build basic match results from parsed_jobs
+        if not match_results:
+            parsed_jobs = state.get("parsed_jobs", [])
+            user_profile = state.get("user_profile") or {}
+            user_skills = user_profile.get("skills", [])
+            user_skills_lower = {us.lower() for us in user_skills}
+
+            for job in parsed_jobs[:10]:
+                job_skills = job.get("skills_required", [])
+                matched = [s for s in job_skills if s.lower() in user_skills_lower]
+                missing = [s for s in job_skills if s.lower() not in user_skills_lower]
+                score = (len(matched) / len(job_skills) * 100) if job_skills else 70.0
+
+                match_results.append({
+                    "job": job,
+                    "overall_score": round(score * 0.5 + 75 * 0.5, 1),
+                    "skill_match": round(score, 1),
+                    "education_match": 80.0,
+                    "matched_skills": matched,
+                    "missing_skills": missing,
+                    "recommendation_reason": f"匹配技能: {', '.join(matched[:3])}" if matched else job.get("title", ""),
+                    "risk_factors": [f"缺少: {', '.join(missing[:3])}"] if len(missing) > 2 else [],
+                })
+
+        # Sort by score
+        match_results.sort(key=lambda x: x.get("overall_score", 0), reverse=True)
 
         return {
             "current_phase": "match",
             "match_results": match_results[:10],
         }
 
-    async def _llm_rerank(self, candidates: list[dict], user_profile: dict) -> list[dict]:
-        """Use LLM to rerank top candidates and generate better reasons."""
-        llm = self._get_llm()
 
-        jobs_desc = "\n".join(
-            f"{i+1}. {c['job'].get('title', '')} @ {c['job'].get('company', '')} "
-            f"(技能: {', '.join(c['job'].get('skills_required', [])[:5])})"
-            for i, c in enumerate(candidates)
-        )
-
-        prompt = f"""用户技能: {', '.join(user_profile.get('skills', []))}
-用户学历: {user_profile.get('education', '未知')}
-
-候选岗位:
-{jobs_desc}
-
-请为每个岗位生成一句推荐理由（中文，20字以内），以JSON数组格式输出：
-[{{"index": 1, "reason": "推荐理由"}}]"""
-
-        response = await llm.ainvoke([
-            {"role": "system", "content": "你是求职匹配专家，为候选人生成精准的推荐理由。"},
-            {"role": "user", "content": prompt},
-        ])
-
-        try:
-            content = response.content
-            if "```json" in content:
-                json_str = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                json_str = content.split("```")[1].split("```")[0]
-            else:
-                json_str = content
-            reasons = json.loads(json_str.strip())
-            for item in reasons:
-                idx = item.get("index", 0) - 1
-                if 0 <= idx < len(candidates):
-                    candidates[idx]["recommendation_reason"] = item.get("reason", "")
-        except (json.JSONDecodeError, IndexError):
-            pass
-
-        return candidates
-
-    def _education_score(self, job: dict, user_profile: dict) -> float:
-        job_edu = (job.get("education") or "").lower()
-        user_edu = (user_profile.get("education") or "").lower()
-        levels = {"大专": 1, "本科": 2, "硕士": 3, "博士": 4}
-        job_level = levels.get(job_edu, 0)
-        user_level = levels.get(user_edu, 0)
-        if job_level == 0 or user_level == 0:
-            return 80.0
-        if user_level >= job_level:
-            return 100.0
-        return max(0.0, 100.0 - (job_level - user_level) * 30)
-
-    def _location_score(self, job: dict, user_profile: dict) -> float:
-        preferred = user_profile.get("preferred_locations", [])
-        job_location = job.get("location", "")
-        if not preferred or not job_location:
-            return 80.0
-        if any(loc in job_location for loc in preferred):
-            return 100.0
-        return 50.0
-
-    def _generate_reason(self, skill_result: dict, job: dict) -> str:
-        matched = skill_result["matched_skills"]
-        if matched:
-            return f"匹配技能: {', '.join(matched[:3])}"
-        return f"{job.get('title', '')} - {job.get('company', '')}"
-
-    def _identify_risks(self, skill_result: dict, job: dict, user_profile: dict) -> list[str]:
-        risks = []
-        missing = skill_result["missing_skills"]
-        if len(missing) > 2:
-            risks.append(f"缺少关键技能: {', '.join(missing[:3])}")
-        if skill_result["match_ratio"] < 0.5:
-            risks.append("技能匹配度偏低")
-        return risks
-
-
+# Singleton instance
 match_agent = MatchAgent()
