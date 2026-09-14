@@ -77,7 +77,29 @@ class SessionStore:
             return None
         if not isinstance(decoded, dict):
             return None
-        return cast(dict[str, Any], decoded)
+        info = cast(dict[str, Any], decoded)
+
+        # Redis Lua's cjson encoder serializes an empty Lua table as ``{}``,
+        # even when the value originated from a JSON array.  Normalise the
+        # known list fields before Pydantic/frontend consumers validate them.
+        progress = info.get("progress")
+        if isinstance(progress, dict):
+            for field in ("completed_steps", "pending_steps"):
+                if progress.get(field) == {}:
+                    progress[field] = []
+
+        results = info.get("results_summary")
+        if isinstance(results, dict):
+            for field in (
+                "recommendations",
+                "resume_diff",
+                "interview_questions",
+                "agent_execution_order",
+            ):
+                if results.get(field) == {}:
+                    results[field] = []
+
+        return info
 
     # --- Public API ---
 

@@ -104,6 +104,26 @@ class TestSessionStoreDegradedMode:
 
 
 class TestSessionStoreSerialization:
+    def test_decode_normalizes_empty_arrays_encoded_by_lua_cjson(self):
+        raw = json.dumps(
+            {
+                "progress": {"completed_steps": ["intent"], "pending_steps": {}},
+                "results_summary": {
+                    "recommendations": [],
+                    "resume_diff": {},
+                    "interview_questions": {},
+                    "agent_execution_order": ["intent"],
+                },
+            }
+        )
+
+        info = SessionStore._decode_info(raw)
+
+        assert info is not None
+        assert info["progress"]["pending_steps"] == []
+        assert info["results_summary"]["resume_diff"] == []
+        assert info["results_summary"]["interview_questions"] == []
+
     async def test_non_json_native_values_survive(self):
         """datetime-like values get stringified by default=str."""
         from datetime import UTC, datetime

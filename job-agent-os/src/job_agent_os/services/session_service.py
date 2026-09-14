@@ -830,7 +830,41 @@ class SessionService:
                 message="Session not found",
                 code=ErrorCode.SESSION_NOT_FOUND,
             )
-        return info.get("results_summary", {}).get("recommendations", [])
+        recommendations = info.get("results_summary", {}).get("recommendations", [])
+        if not isinstance(recommendations, list):
+            return []
+
+        # MatchAgent stores its canonical score as ``overall_score`` while the
+        # recommendations API/frontend contract calls the same value
+        # ``match_score``.  Keep persisted graph state intact and adapt it at
+        # the API boundary.  Lua cjson may also turn nested empty arrays into
+        # empty objects, so restore those list fields here as well.
+        normalized: list[dict] = []
+        for item in recommendations:
+            if not isinstance(item, dict):
+                continue
+            recommendation = dict(item)
+            recommendation.setdefault(
+                "match_score", recommendation.get("overall_score", 0)
+            )
+            for field in ("matched_skills", "missing_skills", "risk_factors"):
+                if not isinstance(recommendation.get(field), list):
+                    recommendation[field] = []
+
+            job = recommendation.get("job")
+            if isinstance(job, dict):
+                job = dict(job)
+                job.setdefault("salary_range", job.get("salary"))
+                job.setdefault("education_required", job.get("education"))
+                if not isinstance(job.get("skills_required"), list):
+                    job["skills_required"] = []
+                if not isinstance(job.get("structured_jd"), dict):
+                    job["structured_jd"] = {}
+                recommendation["job"] = job
+
+            normalized.append(recommendation)
+
+        return normalized
 
     # ------------------------------------------------------------------
     # Feedback (issue #7)
