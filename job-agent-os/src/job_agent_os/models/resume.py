@@ -32,7 +32,8 @@ class Resume(Base, UUIDMixin, TimestampMixin):
     chunks: Mapped[list] = mapped_column(JSONB, default=list)
     target_direction: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_encrypted: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Raw content is currently stored as plaintext; do not mislabel it.
+    is_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="resumes")

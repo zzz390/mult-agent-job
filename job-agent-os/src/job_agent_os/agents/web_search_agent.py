@@ -5,6 +5,7 @@ this agent uses LLM to identify target companies and searches their career sites
 """
 
 import json
+from urllib.parse import urlparse
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -23,10 +24,12 @@ WEB_SEARCH_SYSTEM_PROMPT = """你是企业官网招聘信息搜索专家。当�
 1. 根据用户的求职条件（地区、企业类型、方向），列出可能正在招聘的目标企业
 2. 尝试访问这些企业的招聘页面（常见URL模式：hr.company.com、recruit.company.com）
 3. 从页面中提取岗位信息
-4. 如果无法直接爬取，基于你对这些企业的了解，生成合理的在招岗位信息
-5. 将所有岗位调用 save_jobs_db 存入数据库
+4. 只返回页面中实际出现且能提供来源URL的岗位；无法验证时返回空列表
+5. 将有可验证来源的岗位调用 save_jobs_db 存入数据库
 
-最终输出：将搜索/生成的岗位以JSON数组格式输出，每个岗位包含 title、company、company_type、location、salary、skills_required、raw_description 字段。"""
+禁止凭常识、记忆或猜测生成在招岗位。
+
+最终输出：将搜索到的岗位以JSON数组格式输出，每个岗位包含 title、company、company_type、location、salary、skills_required、raw_description、source_url 字段。"""
 
 
 class WebSearchAgent(BaseAgent):
@@ -81,6 +84,15 @@ class WebSearchAgent(BaseAgent):
                             all_jobs = parsed
                 except (json.JSONDecodeError, ValueError):
                     pass
+
+        # Never allow an unsourced LLM-generated listing into downstream matching.
+        all_jobs = [
+            job
+            for job in all_jobs
+            if isinstance(job, dict)
+            and urlparse(str(job.get("source_url", ""))).scheme in {"http", "https"}
+            and bool(urlparse(str(job.get("source_url", ""))).hostname)
+        ]
 
         # Merge platforms_searched with existing state value (dedup, preserve order)
         existing_platforms = state.get("platforms_searched", [])

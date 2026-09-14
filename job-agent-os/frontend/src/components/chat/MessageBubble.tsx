@@ -23,7 +23,7 @@ export function MessageBubble({
   if (message.kind === "progress" && message.progress) {
     return <ProgressCard progress={message.progress} />;
   }
-  if (message.kind === "clarification" && message.approval) {
+  if (message.kind === "clarification") {
     return (
       <ClarificationCard
         message={message}

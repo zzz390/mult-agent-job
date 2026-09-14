@@ -1,100 +1,205 @@
-"""国聘 platform adapter."""
+"""国聘 public job API adapter.
 
-import asyncio
-import time
+The current website loads jobs through a public JSON endpoint. Using that
+protocol directly is faster and more stable than launching a browser and does
+not depend on CAPTCHA handling, automation fingerprints, or disabled TLS
+verification.
+"""
+
+from __future__ import annotations
+
+from typing import Any, ClassVar
+from urllib.parse import quote
 
 import httpx
-from bs4 import BeautifulSoup
 
 from job_agent_os.tools.search.base import PlatformAdapter
 
 
 class GuopinAdapter(PlatformAdapter):
-    """国聘 search adapter for state-owned enterprise jobs."""
+    """Low-frequency adapter for public state-owned-enterprise job data."""
 
     platform_name = "guopin"
     rate_limit = 5
-    base_url = "https://www.guopin.com"
+    base_url = "https://www.iguopin.com"
+    api_base_url = "https://gp-api.iguopin.com"
+    render_with_playwright = False
 
-    def __init__(self) -> None:
-        self._last_request_time: float = 0
-        self._min_interval: float = 60.0 / self.rate_limit
-
-    async def _rate_limit_wait(self) -> None:
-        elapsed = time.time() - self._last_request_time
-        if elapsed < self._min_interval:
-            await asyncio.sleep(self._min_interval - elapsed)
-        self._last_request_time = time.time()
+    _district_paths: ClassVar[dict[str, str] | None] = None
 
     def _build_search_url(self, query: dict) -> str:
-        keyword = query.get("direction", "") or " ".join(query.get("skills", []))
-        return f"{self.base_url}/search?keyword={keyword}"
-
-    def _get_headers(self) -> dict[str, str]:
-        return {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-        }
+        """Return the current human-facing result URL for provenance/debugging."""
+        keyword = self._extract_keyword(query)
+        return f"{self.base_url}/job/list?keyword={quote(keyword)}"
 
     async def search(self, query: dict) -> list[dict]:
-        """Search jobs on Guopin."""
-        await self._rate_limit_wait()
-        url = self._build_search_url(query)
+        """Search the public `/api/jobs/v1/recom-job` endpoint."""
+        async with self._single_flight_search():
+            return await self._search_once(query)
+
+    async def _search_once(self, query: dict) -> list[dict]:
+        """Run one Guopin query while holding its platform-wide search slot."""
+        search_filters: dict[str, Any] = {
+            "page": 1,
+            "page_size": 20,
+            "keyword": self._extract_keyword(query),
+        }
+        regions = [str(item).strip() for item in query.get("region", []) if item]
+        if regions:
+            district_path = await self._resolve_district_path(regions[0])
+            if district_path:
+                search_filters["district"] = [district_path]
+
+        payload = {
+            "search": search_filters,
+            "recom": {
+                "update_time": True,
+                "company_nature": True,
+                "hot_job": True,
+            },
+        }
+        response_data = await self._request_jobs(payload)
+        data = response_data.get("data") or {}
+        raw_jobs = data.get("list") or []
+        requested_types = {str(item).strip() for item in query.get("company_type", []) if item}
+
         jobs: list[dict] = []
-
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(url, headers=self._get_headers())
-                response.raise_for_status()
-
-                soup = BeautifulSoup(response.text, "html.parser")
-                job_cards = soup.select(".job-item, .position-item, .job-card")
-
-                for card in job_cards[:20]:
-                    job = self._parse_job_card(card)
-                    if job:
-                        jobs.append(job)
-
-        except httpx.TimeoutException:
-            raise TimeoutError(f"Guopin search timed out")
-        except httpx.HTTPStatusError as e:
-            raise ConnectionError(f"Guopin returned status {e.response.status_code}")
-        except Exception as e:
-            raise RuntimeError(f"Guopin search failed: {str(e)}")
-
+        for raw in raw_jobs:
+            job = self._parse_api_job(raw)
+            if not job:
+                continue
+            if requested_types and not self._matches_company_type(str(job.get("company_type") or ""), requested_types):
+                continue
+            jobs.append(job)
         return jobs
 
-    def _parse_job_card(self, card: BeautifulSoup) -> dict | None:
-        try:
-            title_el = card.select_one(".job-name, .position-name, h3")
-            company_el = card.select_one(".company-name, .corp-name")
-            location_el = card.select_one(".job-area, .work-place")
-            link_el = card.select_one("a[href]")
+    async def _request_jobs(self, payload: dict) -> dict:
+        await self._rate_limit_wait()
+        async with httpx.AsyncClient(**self._httpx_client_kwargs()) as client:
+            response = await client.post(
+                f"{self.api_base_url}/api/jobs/v1/recom-job",
+                json=payload,
+                headers=self._api_headers(),
+            )
+            response.raise_for_status()
+            result = response.json()
+        if result.get("code") != 200:
+            raise ConnectionError(result.get("msg") or "Guopin API request failed")
+        return result
 
-            title = title_el.get_text(strip=True) if title_el else ""
-            company = company_el.get_text(strip=True) if company_el else ""
-            location = location_el.get_text(strip=True) if location_el else ""
+    async def _resolve_district_path(self, region: str) -> str | None:
+        if self.__class__._district_paths is None:
+            await self._rate_limit_wait()
+            async with httpx.AsyncClient(**self._httpx_client_kwargs()) as client:
+                response = await client.get(
+                    f"{self.api_base_url}/api/base/districts/v1/tree",
+                    headers=self._api_headers(),
+                )
+                response.raise_for_status()
+                result = response.json()
+            if result.get("code") != 200:
+                raise ConnectionError(result.get("msg") or "Guopin district API request failed")
+            self.__class__._district_paths = self._build_district_paths(result.get("data") or [])
 
-            if not title or not company:
-                return None
+        normalized = self._normalize_region(region)
+        return (self.__class__._district_paths or {}).get(normalized)
 
-            source_url = ""
-            if link_el and link_el.get("href"):
-                href = link_el["href"]
-                source_url = f"{self.base_url}{href}" if href.startswith("/") else href
+    @classmethod
+    def _build_district_paths(cls, tree: list[dict]) -> dict[str, str]:
+        paths: dict[str, str] = {}
 
-            return {
-                "title": title,
-                "company": company,
-                "salary": "",
-                "location": location,
-                "source_url": source_url,
-                "source_platform": self.platform_name,
-                "raw_description": "",
-            }
-        except Exception:
+        def walk(nodes: list[dict], parents: tuple[str, ...] = ()) -> None:
+            for node in nodes:
+                value = str(node.get("value") or "").strip()
+                if not value:
+                    continue
+                current = (*parents, value)
+                path = ".".join(current)
+                for key in (node.get("label"), node.get("name")):
+                    if key:
+                        # Deeper paths intentionally replace province-level
+                        # aliases such as 北京 with the more precise city path.
+                        paths[cls._normalize_region(str(key))] = path
+                children = node.get("children") or []
+                if isinstance(children, list):
+                    walk(children, current)
+
+        walk(tree)
+        return paths
+
+    @staticmethod
+    def _normalize_region(region: str) -> str:
+        return str(region).strip().removesuffix("省").removesuffix("市")
+
+    def _api_headers(self) -> dict[str, str]:
+        return {
+            "User-Agent": self._random_ua(),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Content-Type": "application/json",
+            "Origin": self.base_url,
+            "Referer": f"{self.base_url}/",
+            "Device": "pc",
+            "Version": "5.2.300",
+            "Subsite": "iguopin",
+        }
+
+    def _parse_api_job(self, raw: dict) -> dict | None:
+        title = str(raw.get("job_name") or "").strip()
+        company = str(raw.get("company_name") or "").strip()
+        job_id = str(raw.get("job_id") or "").strip()
+        if not title or not company or not job_id:
             return None
 
+        districts = raw.get("district_list") or []
+        locations = [
+            str(item.get("area_cn") or "").strip()
+            for item in districts
+            if isinstance(item, dict) and item.get("area_cn")
+        ]
+        company_info = raw.get("company_info") or {}
+        salary = self._format_salary(raw)
+        deadline = str(raw.get("end_time") or "")[:10]
+        majors = [str(item) for item in raw.get("major_cn") or [] if item]
+
+        return {
+            "title": title,
+            "company": company,
+            "company_type": str(company_info.get("nature_cn") or ""),
+            "location": "、".join(dict.fromkeys(locations)),
+            "salary": salary,
+            "salary_min": raw.get("min_wage"),
+            "salary_max": raw.get("max_wage"),
+            "education": str(raw.get("education_cn") or ""),
+            "experience": str(raw.get("experience_cn") or ""),
+            "skills_required": majors,
+            "raw_description": str(raw.get("contents") or ""),
+            "deadline": deadline,
+            "source_url": f"{self.base_url}/job/detail?id={quote(job_id)}",
+            "source_platform": self.platform_name,
+        }
+
+    @staticmethod
+    def _format_salary(raw: dict) -> str:
+        if raw.get("is_negotiable"):
+            return "面议"
+        minimum = raw.get("min_wage")
+        maximum = raw.get("max_wage")
+        if minimum is None and maximum is None:
+            return ""
+        unit = str(raw.get("wage_unit_cn") or "元/月")
+        if minimum == maximum:
+            return f"{minimum}{unit}"
+        return f"{minimum or 0}-{maximum or 0}{unit}"
+
+    @staticmethod
+    def _matches_company_type(actual: str, requested: set[str]) -> bool:
+        if not requested:
+            return True
+        if any(item in actual for item in requested):
+            return True
+        state_owned = {"国企", "央企", "国有企业", "中央企业"}
+        return bool(requested & state_owned) and actual in state_owned
+
     async def parse_result(self, raw: dict) -> dict:
-        return raw
+        return self._parse_api_job(raw) or raw

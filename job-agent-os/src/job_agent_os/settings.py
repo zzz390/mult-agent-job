@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -85,9 +85,15 @@ class Settings(BaseSettings):
 
     # App
     app_name: str = "Job Agent OS"
-    env: Literal["dev", "test", "prod"] = "dev"
-    debug: bool = True
-    version: str = "0.1.0"
+    env: Literal["dev", "test", "prod"] = Field(
+        default="dev", validation_alias=AliasChoices("ENV", "APP_ENV")
+    )
+    debug: bool = Field(
+        default=True, validation_alias=AliasChoices("DEBUG", "APP_DEBUG")
+    )
+    version: str = Field(
+        default="0.1.0", validation_alias=AliasChoices("VERSION", "APP_VERSION")
+    )
 
     # Database
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/job_agent_os"
@@ -98,9 +104,13 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int = 20
+    session_ttl_seconds: int = 86400 * 7
+
+    # Uploads
+    max_resume_upload_bytes: int = 10 * 1024 * 1024
 
     # JWT
-    jwt_secret_key: SecretStr = SecretStr("your-super-secret-key-change-in-production")
+    jwt_secret_key: SecretStr = SecretStr("")
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 30
     jwt_refresh_token_expire_days: int = 7
@@ -134,17 +144,23 @@ class Settings(BaseSettings):
     harness_loop_detection_threshold: int = 3
 
     # CORS
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: list[str] = Field(default=["http://localhost:3000"])
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_cors_origins(cls, values: dict) -> dict:
+        cors = values.get("cors_origins")
+        if isinstance(cors, str):
+            values["cors_origins"] = [x.strip() for x in cors.split(",") if x.strip()]
+        return values
 
     @model_validator(mode="after")
     def validate_security(self) -> "Settings":
-        """Validate security settings in production."""
-        if self.env == "prod" and (
-            self.jwt_secret_key.get_secret_value()
-            == "your-super-secret-key-change-in-production"
-        ):
+        """Validate security settings in all environments."""
+        secret = self.jwt_secret_key.get_secret_value()
+        if not secret or secret == "your-super-secret-key-change-in-production":
             raise ValueError(
-                "jwt_secret_key must be changed from default value in production"
+                "jwt_secret_key must be configured and changed from default value"
             )
         return self
 

@@ -5,6 +5,8 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
+from job_agent_os.core.llm_usage import collect_message_usage, message_content_to_text
+from job_agent_os.harness.recovery_manager import is_fallback_model_requested
 from job_agent_os.prompts.loader import load_prompt
 from job_agent_os.settings import get_settings
 
@@ -12,6 +14,8 @@ from job_agent_os.settings import get_settings
 async def optimize_resume_keywords(
     resume_content: str,
     job_description: str,
+    use_fallback: bool = False,
+    usage_sink: dict[str, int | float] | None = None,
 ) -> dict[str, Any]:
     """Optimize resume for a target job using LLM.
 
@@ -23,8 +27,9 @@ async def optimize_resume_keywords(
         Dict with optimized_resume, resume_diff, and suggestions
     """
     settings = get_settings()
+    use_fallback = use_fallback or is_fallback_model_requested()
     llm = ChatOpenAI(
-        model=settings.openai_model,
+        model=settings.openai_model_fallback if use_fallback else settings.openai_model,
         api_key=settings.openai_api_key.get_secret_value(),
         base_url=settings.openai_base_url,
         temperature=0.3,
@@ -42,8 +47,10 @@ async def optimize_resume_keywords(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ])
+        if usage_sink is not None:
+            collect_message_usage(response, usage_sink)
 
-        result = _parse_optimization_response(response.content)
+        result = _parse_optimization_response(message_content_to_text(response.content))
         return result
 
     except Exception:
@@ -60,12 +67,14 @@ def _parse_optimization_response(content: str) -> dict[str, Any]:
         else:
             json_str = content
         result = json.loads(json_str.strip())
+        if not isinstance(result, dict):
+            raise ValueError("resume optimizer response must be a JSON object")
         return {
             "optimized_resume": result.get("optimized_resume", ""),
             "resume_diff": result.get("changes", result.get("resume_diff", [])),
             "suggestions": result.get("suggestions", []),
         }
-    except (json.JSONDecodeError, IndexError):
+    except (json.JSONDecodeError, IndexError, ValueError):
         return {
             "optimized_resume": content,
             "resume_diff": [{"section": "整体", "before": "", "after": content[:200], "reason": "LLM优化"}],

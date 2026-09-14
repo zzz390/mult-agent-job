@@ -3,10 +3,10 @@
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, DateTime, Integer, String, Text
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import Date, DateTime, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from pgvector.sqlalchemy import Vector
 
 from job_agent_os.models.base import Base, TimestampMixin, UUIDMixin
 
@@ -43,5 +43,12 @@ class Job(Base, UUIDMixin, TimestampMixin):
     content_hash: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     crawled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    __table_args__ = (
+        Index("ix_jobs_status", "status"),
+        Index("ix_jobs_location", "location"),
+        Index("ix_jobs_created_at", "created_at"),
+        Index("ix_jobs_source_platform", "source_platform"),
+    )
+
     # Relationships
-    applications: Mapped[list["Application"]] = relationship(back_populates="job", lazy="selectin")
+    applications: Mapped[list["Application"]] = relationship(back_populates="job", lazy="noload")

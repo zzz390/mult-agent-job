@@ -1,5 +1,6 @@
 """Approvals endpoints."""
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Query
@@ -20,8 +21,8 @@ router = APIRouter()
 async def list_approvals(
     db: DBSession,
     user: CurrentUser,
-    status: str | None = Query(default=None),
-    session_id: UUID | None = Query(default=None),
+    status: Annotated[str | None, Query()] = None,
+    session_id: Annotated[UUID | None, Query()] = None,
 ) -> dict:
     """List approvals (default: pending first)."""
     service = ApprovalService(db)
@@ -71,4 +72,3 @@ async def batch_respond(
     service = ApprovalService(db)
     results = await service.batch_respond(user, request)
     return success_response(data=results)
-

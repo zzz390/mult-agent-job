@@ -2,12 +2,18 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any, cast
+from uuid import UUID
 
 from job_agent_os.graph.state import JobAgentState
 from job_agent_os.harness.budget_controller import BudgetController
-from job_agent_os.harness.guard_rails import GuardRailChain, GuardRailViolation
+from job_agent_os.harness.guard_rails import (
+    GuardRailChain,
+    GuardRailViolation,
+    TokenBudgetGuard,
+)
 from job_agent_os.harness.recovery_manager import RecoveryManager
 from job_agent_os.harness.trace_manager import TraceManager
 from job_agent_os.settings import get_settings
@@ -31,8 +37,9 @@ class HarnessRuntime:
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        self._active_sessions: dict[str, Any] = {}
-        self._active_tasks: dict[str, asyncio.Task] = {}
+        # TODO: Replace in-memory _active_sessions with Redis backend for multi-instance deployments
+        self._active_sessions: dict[str, dict[str, Any]] = {}
+        self._active_tasks: dict[str, asyncio.Task[Any]] = {}
         self._trace_managers: dict[str, TraceManager] = {}
         self._budget_controllers: dict[str, BudgetController] = {}
         self._recovery_managers: dict[str, RecoveryManager] = {}
@@ -41,8 +48,8 @@ class HarnessRuntime:
     async def execute(
         self,
         graph: Any,
-        initial_state: JobAgentState,
-        config: dict | None = None,
+        initial_state: JobAgentState | None,
+        config: dict[str, Any] | None = None,
     ) -> JobAgentState:
         """Execute a graph with harness protections.
 
@@ -58,7 +65,12 @@ class HarnessRuntime:
         # Supervisor loop needs higher recursion limit:
         # each agent = 2 steps (supervisor + agent), 8 agents = 16+ steps
         config.setdefault("recursion_limit", 100)
-        session_id = initial_state.get("session_id", "default")
+        configurable = config.get("configurable", {})
+        session_id = (
+            initial_state.get("session_id", "default")
+            if initial_state is not None
+            else str(configurable.get("thread_id", "default"))
+        )
 
         # Initialize harness components for this session
         trace_manager = TraceManager()
@@ -76,7 +88,7 @@ class HarnessRuntime:
             "status": "running",
             "steps": 0,
             "tokens_used": 0,
-            "started_at": datetime.now(timezone).isoformat(),
+            "started_at": datetime.now(UTC).isoformat(),
         }
 
         try:
@@ -97,14 +109,6 @@ class HarnessRuntime:
 
             # --- Wrap graph invocation as asyncio.Task for cancellation ---
             async def _invoke_graph() -> Any:
-                # Guard rails before execution
-                try:
-                    guard_chain.before_node("__graph_start__", dict(initial_state))
-                except GuardRailViolation:
-                    raise
-                except Exception as e:
-                    logger.warning("Guard rail before_node failed: %s", e)
-
                 # Execute graph with recovery wrapping
                 async def _graph_call() -> Any:
                     return await graph.ainvoke(initial_state, config)
@@ -124,17 +128,6 @@ class HarnessRuntime:
             finally:
                 self._active_tasks.pop(session_id, None)
 
-            # --- Post-execution: guard rails after node ---
-            if isinstance(result, dict):
-                try:
-                    guard_chain.after_node(
-                        "__graph_end__", dict(initial_state), result
-                    )
-                except GuardRailViolation as e:
-                    logger.warning("Guard rail after_node violation: %s", e)
-                except Exception as e:
-                    logger.warning("Guard rail after_node failed: %s", e)
-
             # --- Update session tracking data from trace manager ---
             try:
                 logs = trace_manager.get_logs()
@@ -150,28 +143,167 @@ class HarnessRuntime:
             # Update session status
             self._active_sessions[session_id]["status"] = "completed"
             self._active_sessions[session_id]["finished_at"] = (
-                datetime.now(timezone).isoformat()
+                datetime.now(UTC).isoformat()
             )
 
-            return result
+            return cast(JobAgentState, result)
 
         except asyncio.CancelledError:
             self._active_sessions[session_id]["status"] = "cancelled"
             self._active_sessions[session_id]["finished_at"] = (
-                datetime.now(timezone).isoformat()
+                datetime.now(UTC).isoformat()
             )
             raise
         except Exception as e:
             self._active_sessions[session_id]["status"] = "error"
             self._active_sessions[session_id]["error"] = str(e)
             self._active_sessions[session_id]["finished_at"] = (
-                datetime.now(timezone).isoformat()
+                datetime.now(UTC).isoformat()
             )
             raise
         finally:
+            await self._flush_trace(session_id)
             self._schedule_cleanup(session_id)
 
-    def get_session_status(self, session_id: str) -> dict:
+    async def execute_node(
+        self,
+        node_name: str,
+        state: JobAgentState,
+        operation: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Apply node-level guards, traces, and token accounting."""
+        session_id = str(state.get("session_id", "default"))
+        guard_chain = self._guard_chains.get(session_id)
+        trace_manager = self._trace_managers.get(session_id)
+        budget = self._budget_controllers.get(session_id)
+        if guard_chain is None or trace_manager is None or budget is None:
+            return await operation()
+
+        # A HITL resume creates a fresh runtime budget controller. Seed it from
+        # the checkpointed cumulative usage so pausing cannot reset the budget.
+        checkpoint_usage = state.get("token_usage", {})
+        checkpoint_tokens = (
+            int(checkpoint_usage.get("total_tokens", 0) or 0)
+            if isinstance(checkpoint_usage, dict)
+            else 0
+        )
+        if budget.tokens_used == 0 and checkpoint_tokens > 0:
+            budget.record_usage(checkpoint_tokens, "checkpoint")
+            token_guard = guard_chain.get_guard("token_budget")
+            if isinstance(token_guard, TokenBudgetGuard) and token_guard.tokens_used == 0:
+                token_guard.add_usage(checkpoint_tokens)
+
+        # The graph itself knows which node is executing, but previously that
+        # information stayed inside the runtime until the whole workflow had
+        # finished.  Publish it before invoking the Agent so the SSE endpoint
+        # can update the chat UI in real time.
+        await self._publish_node_activity(session_id, node_name, "running")
+        guard_chain.before_node(node_name, dict(state))
+        try:
+            sid = UUID(session_id)
+        except (TypeError, ValueError):
+            sid = None
+        try:
+            user_id = UUID(str(state.get("user_id", "")))
+        except (TypeError, ValueError):
+            user_id = None
+        span_id = trace_manager.on_node_start(
+            node_name=node_name,
+            agent_name=node_name,
+            input_data=dict(state),
+            session_id=sid,
+            user_id=user_id,
+        )
+        try:
+            result = await operation()
+            if "error_state" not in result:
+                result["error_state"] = None
+            guard_chain.after_node(node_name, dict(state), result)
+            usage = result.get("token_usage", {})
+            tokens = int(usage.get("total_tokens", 0) or 0) if isinstance(usage, dict) else 0
+            budget_status = budget.record_usage(tokens, node_name)
+            if budget_status.should_degrade:
+                result["use_fallback_model"] = True
+            trace_manager.on_node_end(span_id, result, usage)
+            if budget_status.should_terminate:
+                raise GuardRailViolation("budget", budget_status.message)
+            await self._publish_node_activity(session_id, node_name, "completed")
+            return result
+        except Exception as exc:
+            if span_id in trace_manager._active_spans:
+                trace_manager.on_node_error(span_id, exc)
+            await self._publish_node_activity(session_id, node_name, "failed")
+            raise
+
+    async def _publish_node_activity(
+        self, session_id: str, node_name: str, activity_status: str
+    ) -> None:
+        """Mirror the currently executing graph node into the session store.
+
+        This is deliberately best-effort: observability must never prevent an
+        Agent from running.  A missing record is normal when the user deletes
+        a session while its background task is winding down.
+        """
+        if session_id not in self._active_sessions:
+            return
+
+        try:
+            from job_agent_os.core.utils import utc_now
+            from job_agent_os.services.session_store import get_session_store
+
+            store = get_session_store()
+            info = await store.get(session_id)
+            if info is None:
+                return
+
+            progress = dict(info.get("progress") or {})
+            completed_steps = list(progress.get("completed_steps") or [])
+            if activity_status == "completed" and node_name not in completed_steps:
+                completed_steps.append(node_name)
+
+            is_running = activity_status == "running"
+            progress.update(
+                {
+                    "completed_steps": completed_steps,
+                    "current_step": node_name if is_running else None,
+                    "active_agent": node_name if is_running else None,
+                    "active_agent_status": activity_status,
+                }
+            )
+            await store.update(
+                session_id,
+                current_phase=node_name,
+                progress={
+                    "completed_steps": progress["completed_steps"],
+                    "current_step": progress["current_step"],
+                    "active_agent": progress["active_agent"],
+                    "active_agent_status": progress["active_agent_status"],
+                },
+                updated_at=utc_now().isoformat(),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Failed to publish activity for session %s, node %s",
+                session_id,
+                node_name,
+                exc_info=True,
+            )
+
+    async def _flush_trace(self, session_id: str) -> None:
+        trace_manager = self._trace_managers.get(session_id)
+        if trace_manager is None or not trace_manager.get_logs():
+            return
+        try:
+            from job_agent_os.db.session import get_session_factory
+
+            async with get_session_factory()() as db:
+                trace_manager.db = db
+                await trace_manager.flush_to_db()
+                await db.commit()
+        except Exception:
+            logger.exception("Failed to persist traces for session %s", session_id)
+
+    def get_session_status(self, session_id: str) -> dict[str, Any]:
         """Get session execution status."""
         return self._active_sessions.get(session_id, {"status": "not_found"})
 

@@ -2,9 +2,10 @@
 
 import asyncio
 from collections import defaultdict
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Callable, Coroutine
+from typing import Any
 from uuid import UUID, uuid4
 
 # Event handler type

@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from job_agent_os.agents.intent_agent import IntentAgent, IntentOutput
 
@@ -67,6 +67,15 @@ class TestIntentAgentFallbackParse:
         job_query = result["job_query"]
         assert job_query["direction"] == "Python"
         assert job_query["region"] == []
+
+    def test_non_json_llm_output_uses_keyword_fallback(self, agent):
+        result = agent._parse_final_output(
+            [AIMessage(content="我理解你想在深圳找算法岗位")], {}
+        )
+
+        assert result["current_phase"] == "intent"
+        assert result["job_query"]["region"] == ["深圳"]
+        assert result["job_query"]["direction"] == "算法"
 
 
 class TestIntentAgentExecute:

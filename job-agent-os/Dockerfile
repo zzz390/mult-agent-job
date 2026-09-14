@@ -25,9 +25,14 @@ WORKDIR /app
 # Copy dependencies from builder
 COPY --from=builder /app/.venv /app/.venv
 
+# Playwright needs both the Chromium binary and its system libraries.
+RUN /app/.venv/bin/playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy source code
 COPY src/ /app/src/
 COPY configs/ /app/configs/
+COPY alembic.ini /app/alembic.ini
 
 # Set PATH
 ENV PATH="/app/.venv/bin:$PATH"

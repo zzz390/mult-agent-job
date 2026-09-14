@@ -31,7 +31,9 @@ def accuracy(predictions: list, ground_truths: list) -> MetricResult:
     if not predictions or not ground_truths:
         return MetricResult(name="accuracy", score=0.0)
 
-    correct = sum(1 for p, g in zip(predictions, ground_truths) if p == g)
+    correct = sum(
+        1 for p, g in zip(predictions, ground_truths, strict=False) if p == g
+    )
     total = min(len(predictions), len(ground_truths))
     score = correct / total if total > 0 else 0.0
 
@@ -85,7 +87,7 @@ def consistency(results: list[list]) -> MetricResult:
     comparisons = 0
 
     for run in results[1:]:
-        for b, r in zip(baseline, run):
+        for b, r in zip(baseline, run, strict=False):
             comparisons += 1
             if b == r:
                 agreements += 1
@@ -101,10 +103,11 @@ def consistency(results: list[list]) -> MetricResult:
 
 def f1_score(precision: float, recall: float) -> MetricResult:
     """Compute F1 score from precision and recall."""
-    if precision + recall == 0:
-        score = 0.0
-    else:
-        score = 2 * precision * recall / (precision + recall)
+    score = (
+        0.0
+        if precision + recall == 0
+        else 2 * precision * recall / (precision + recall)
+    )
 
     return MetricResult(
         name="f1_score",

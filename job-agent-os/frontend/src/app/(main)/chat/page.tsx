@@ -2,23 +2,25 @@
 
 import { useCallback } from "react";
 import { ChatStream } from "@/components/chat/ChatStream";
-import { ChatInput } from "@/components/chat/ChatInput";
+import { ChatInput, type ChatSendOptions } from "@/components/chat/ChatInput";
 import { ContextPanel } from "@/components/chat/ContextPanel";
 import { SessionList, MobileSessionDrawer } from "@/components/chat/SessionList";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useSessionPolling, resetSessionPolling } from "@/lib/hooks/useSession";
 import * as sessionsApi from "@/lib/api/sessions";
+import type { SessionProgress } from "@/types/session";
 
 export default function ChatPage() {
-  const { sessionId, isSending, addMessage, setSending, setSessionId, startNewConversation } =
+  const { sessionId, isSending, addMessage, setSending, setSessionId, startNewConversation, updateProgress } =
     useChatStore();
   const sessionStatus = useSessionStore((s) => s.status);
   const resetSession = useSessionStore((s) => s.reset);
+  const setSession = useSessionStore((s) => s.setSession);
   const { startPolling } = useSessionPolling();
 
   const handleSend = useCallback(
-    async (content: string) => {
+    async (content: string, sendOptions?: ChatSendOptions) => {
       setSending(true);
 
       try {
@@ -32,12 +34,37 @@ export default function ChatPage() {
           const session = await sessionsApi.createSession({
             intent: content,
             mode: "full",
+            // Omit options when no platform was selected so the backend keeps
+            // its official-site-first default search strategy.
+            options:
+              sendOptions?.platforms && sendOptions.platforms.length > 0
+                ? { platforms: sendOptions.platforms }
+                : undefined,
           });
+
+          // The create response already contains the first live state
+          // (normally the supervisor Agent).  Render it immediately instead
+          // of waiting for an SSE chunk, which can be delayed by a proxy.
           setSessionId(session.session_id);
-          addMessage({
-            kind: "system",
-            content: "已收到你的求职意向，Agent 团队开始协作处理...",
+          setSession({
+            sessionId: session.session_id,
+            status: session.status,
+            currentPhase: session.current_phase,
+            progress: session.progress,
+            pendingApproval: session.pending_approval,
+            tokenUsage: session.token_usage,
           });
+
+          const initialProgress: SessionProgress = session.progress ?? {
+            completed_steps: [],
+            current_step: session.current_phase,
+            pending_steps: [],
+            active_agent: session.current_phase,
+            active_agent_status:
+              session.status === "running" ? "running" : null,
+          };
+          updateProgress(initialProgress);
+
           // Pass the id so the poller reads a non-null sessionId on first tick
           startPolling(session.session_id);
         } else {
@@ -58,16 +85,33 @@ export default function ChatPage() {
         setSending(false);
       }
     },
-    [sessionId, sessionStatus, addMessage, setSending, setSessionId, startPolling, startNewConversation, resetSession]
+    [
+      sessionId,
+      sessionStatus,
+      // `sendOptions` is an invocation argument, not a captured value.
+      addMessage,
+      setSending,
+      setSessionId,
+      setSession,
+      updateProgress,
+      startPolling,
+      startNewConversation,
+      resetSession,
+    ]
   );
 
-  // Disable input while session is actively running (but allow during approval)
+  // Keep input available when the workflow explicitly asks for clarification.
   const isBusy =
     isSending ||
     (sessionStatus !== null &&
-      !["completed", "failed", "cancelled", "waiting_approval"].includes(
+      !["completed", "failed", "cancelled", "waiting_approval", "waiting_input"].includes(
         sessionStatus
       ));
+  const platformSelectionAvailable =
+    !sessionId ||
+    sessionStatus === "completed" ||
+    sessionStatus === "failed" ||
+    sessionStatus === "cancelled";
 
   // Retry: reset session so the next send starts a fresh session
   const handleRetry = useCallback(() => {
@@ -91,9 +135,12 @@ export default function ChatPage() {
         <ChatInput
           onSend={handleSend}
           disabled={isBusy}
+          platformSelectionAvailable={platformSelectionAvailable}
           placeholder={
             sessionStatus === "waiting_approval"
               ? "请先处理上方待审批事项..."
+              : sessionStatus === "waiting_input"
+                ? "请补充上方所需的信息..."
               : undefined
           }
         />

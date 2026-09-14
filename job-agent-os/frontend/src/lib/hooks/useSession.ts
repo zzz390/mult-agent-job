@@ -1,7 +1,8 @@
-/** useSession hook - polls session status and syncs to stores + chat stream.
+/** useSession hook - keeps session status and chat progress cards in sync.
  *
- * Uses a module-level singleton timer so that only ONE polling loop runs
- * regardless of how many components mount the hook.
+ * SSE provides low-latency updates, while a lightweight poll runs alongside
+ * it.  The latter is important when an intermediary buffers a long-lived SSE
+ * response instead of forwarding its chunks promptly.
  */
 
 "use client";
@@ -13,14 +14,20 @@ import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import type { ApprovalResponse } from "@/types/approval";
 import type { RecommendationItem } from "@/types/job";
-import type { ResumeDiffEntry, SessionStatus } from "@/types/session";
+import type {
+  ResumeDiffEntry,
+  SessionStatus,
+  SessionStreamEvent,
+} from "@/types/session";
 
 const POLL_INTERVAL = 2000;
 const TERMINAL_STATUSES: SessionStatus[] = ["completed", "failed", "cancelled"];
 
 // Module-level singleton state
-let timer: ReturnType<typeof setInterval> | null = null;
+let timer: ReturnType<typeof setTimeout> | null = null;
+let streamAbort: AbortController | null = null;
 let approvalShown: string | null = null;
+let clarificationShown: string | null = null;
 let resultEmitted = false;
 let isPollingActive = false;
 
@@ -108,11 +115,56 @@ function stopTimer() {
     clearTimeout(timer);
     timer = null;
   }
+  if (streamAbort) {
+    streamAbort.abort();
+    streamAbort = null;
+  }
   useSessionStore.getState().setPolling(false);
 }
 
-async function poll() {
-  // Concurrent polling protection: skip if a previous poll is still running
+/** Schedule the polling safety net without allowing overlapping requests. */
+function schedulePoll(delay = POLL_INTERVAL) {
+  if (timer) {
+    clearTimeout(timer);
+  }
+  timer = setTimeout(() => {
+    timer = null;
+    void poll();
+  }, delay);
+}
+
+/**
+ * Apply the useful portion of an SSE frame immediately.  A full REST sync
+ * still follows for approval details, token usage and result summaries.
+ */
+function applyStreamEvent(event: SessionStreamEvent) {
+  const sessionState = useSessionStore.getState();
+  const sessionId = sessionState.sessionId;
+  if (!sessionId) return;
+
+  const nextStatus = event.status ?? sessionState.status ?? "running";
+  const nextPhase =
+    event.phase === undefined ? sessionState.currentPhase : event.phase;
+  const nextProgress = event.progress ?? sessionState.progress;
+
+  if (nextStatus) {
+    sessionState.setSession({
+      sessionId,
+      status: nextStatus,
+      currentPhase: nextPhase,
+      progress: nextProgress,
+      pendingApproval: sessionState.pendingApproval,
+      tokenUsage: sessionState.tokenUsage,
+    });
+  }
+
+  if (event.progress) {
+    useChatStore.getState().updateProgress(event.progress);
+  }
+}
+
+async function syncSession() {
+  // Concurrent update protection: skip if an SSE event and fallback poll race.
   if (isPollingActive) return;
   isPollingActive = true;
 
@@ -126,6 +178,11 @@ async function poll() {
 
   try {
     const session = await sessionsApi.getSession(sid);
+
+    // A retry/new conversation may have replaced the store while this request
+    // was in flight.  Never let an old session snapshot overwrite the new
+    // chat's live progress.
+    if (useSessionStore.getState().sessionId !== sid) return;
 
     useSessionStore.getState().setSession({
       sessionId: session.session_id,
@@ -158,6 +215,18 @@ async function poll() {
         }
       }
       stopTimer();
+    } else if (session.status === "waiting_input") {
+      const question = session.results_summary.clarification_question;
+      const content =
+        typeof question === "string" && question.trim()
+          ? question
+          : "请补充您的求职意向信息。";
+      const marker = `${session.session_id}:${content}`;
+      if (clarificationShown !== marker) {
+        clarificationShown = marker;
+        chat.addMessage({ kind: "clarification", content });
+      }
+      stopTimer();
     } else if (TERMINAL_STATUSES.includes(session.status)) {
       // Terminal state: emit result/error message only once
       if (!resultEmitted) {
@@ -183,9 +252,39 @@ async function poll() {
     isPollingActive = false;
   }
 
-  // Schedule next poll using recursive setTimeout (prevents overlap)
+}
+
+async function poll() {
+  await syncSession();
+
+  // Keep a low-frequency safety net even while SSE remains connected.
   if (useSessionStore.getState().isPolling) {
-    timer = setTimeout(poll, POLL_INTERVAL);
+    schedulePoll();
+  }
+}
+
+async function connectStream(sessionId: string, controller: AbortController) {
+  try {
+    await sessionsApi.streamSession(
+      sessionId,
+      async (event) => {
+        applyStreamEvent(event);
+        await syncSession();
+      },
+      controller.signal
+    );
+  } catch (error) {
+    if (controller.signal.aborted) return;
+  }
+
+  // A healthy backend closes at a waiting/terminal state, which syncSession
+  // handles by stopping.  If the stream failed or was buffered/closed early,
+  // switch to the polling path immediately rather than waiting for a timeout.
+  if (useSessionStore.getState().isPolling && !controller.signal.aborted) {
+    if (streamAbort === controller) {
+      streamAbort = null;
+    }
+    schedulePoll(0);
   }
 }
 
@@ -197,13 +296,26 @@ function startTimer(sessionId?: string) {
     useSessionStore.getState().setSessionId(sessionId);
   }
   useSessionStore.getState().setPolling(true);
-  timer = setTimeout(poll, POLL_INTERVAL);
+  const sid = sessionId ?? useSessionStore.getState().sessionId;
+  if (!sid) {
+    stopTimer();
+    return;
+  }
+  const controller = new AbortController();
+  streamAbort = controller;
+  // Do not wait for the first stream frame before showing the current Agent.
+  void syncSession();
+  // Polling runs as a safety net from the beginning, rather than only after
+  // SSE closes. This makes progress visible through buffering proxies too.
+  schedulePoll();
+  void connectStream(sid, controller);
 }
 
 /** Reset singleton state for a brand-new session. */
 export function resetSessionPolling() {
   stopTimer();
   approvalShown = null;
+  clarificationShown = null;
   resultEmitted = false;
   isPollingActive = false;
 }

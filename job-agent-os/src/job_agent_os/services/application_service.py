@@ -13,6 +13,8 @@ from job_agent_os.core.exceptions import (
 )
 from job_agent_os.core.utils import utc_now
 from job_agent_os.models.application import Application
+from job_agent_os.models.job import Job
+from job_agent_os.models.resume import Resume
 from job_agent_os.models.user import User
 from job_agent_os.schemas.application import (
     ApplicationCreate,
@@ -25,16 +27,18 @@ from job_agent_os.schemas.common import PaginationParams
 # Allowed sort fields for safe dynamic sorting
 ALLOWED_SORT_FIELDS = {"created_at", "updated_at", "status", "priority", "applied_at", "match_score"}
 
-# Valid state transitions
+# Valid user-driven state transitions. Besides normal forward progress, allow
+# one-step corrections and explicit reactivation of a rejected application.
+# Arbitrary jumps (for example pending -> offer) remain invalid.
 VALID_TRANSITIONS: dict[str, list[str]] = {
     "pending": ["applied", "rejected"],
-    "applied": ["written_test", "round1", "rejected"],
-    "written_test": ["round1", "rejected"],
-    "round1": ["round2", "hr_interview", "offer", "rejected"],
-    "round2": ["hr_interview", "offer", "rejected"],
-    "hr_interview": ["offer", "rejected"],
-    "offer": ["rejected"],
-    "rejected": [],
+    "applied": ["pending", "written_test", "round1", "rejected"],
+    "written_test": ["applied", "round1", "rejected"],
+    "round1": ["applied", "written_test", "round2", "hr_interview", "offer", "rejected"],
+    "round2": ["round1", "hr_interview", "offer", "rejected"],
+    "hr_interview": ["round1", "round2", "offer", "rejected"],
+    "offer": ["hr_interview", "rejected"],
+    "rejected": ["pending"],
 }
 
 # All valid statuses
@@ -51,6 +55,21 @@ class ApplicationService:
         self, user: User, data: ApplicationCreate
     ) -> Application:
         """Create a new application."""
+        resume_result = await self.db.execute(
+            select(Resume.id).where(
+                Resume.id == data.resume_id,
+                Resume.user_id == user.id,
+            )
+        )
+        if resume_result.scalar_one_or_none() is None:
+            raise NotFoundException(
+                message="Resume not found", code=ErrorCode.RESUME_NOT_FOUND
+            )
+
+        job_result = await self.db.execute(select(Job.id).where(Job.id == data.job_id))
+        if job_result.scalar_one_or_none() is None:
+            raise NotFoundException(message="Job not found", code=ErrorCode.JOB_NOT_FOUND)
+
         # Check for duplicate
         existing = await self.db.execute(
             select(Application).where(
@@ -164,12 +183,14 @@ class ApplicationService:
         application.last_status_change = utc_now()
 
         # Append to status history
-        history = application.status_history or []
+        history = list(application.status_history or [])
         history.append(
             {
+                "from_status": current_status,
                 "status": new_status,
                 "timestamp": utc_now().isoformat(),
                 "notes": data.notes,
+                "source": "manual",
             }
         )
         application.status_history = history

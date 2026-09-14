@@ -1,12 +1,9 @@
 """Common schemas (pagination, response wrapper)."""
 
 from datetime import UTC, datetime
-from typing import Generic, TypeVar
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
-
-T = TypeVar("T")
 
 
 class Meta(BaseModel):
@@ -36,7 +33,7 @@ class PaginationMeta(BaseModel):
     has_prev: bool
 
 
-class ApiResponse(BaseModel, Generic[T]):
+class ApiResponse[T](BaseModel):
     """Unified API response wrapper."""
 
     code: int = 0
@@ -45,7 +42,7 @@ class ApiResponse(BaseModel, Generic[T]):
     meta: Meta = Field(default_factory=Meta)
 
 
-class PaginatedData(BaseModel, Generic[T]):
+class PaginatedData[T](BaseModel):
     """Paginated data wrapper."""
 
     items: list[T]

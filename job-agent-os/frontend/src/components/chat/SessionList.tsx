@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Menu, MessageSquare, Plus } from "lucide-react";
+import { Loader2, Menu, MessageSquare, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import * as sessionsApi from "@/lib/api/sessions";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { resetSessionPolling } from "@/lib/hooks/useSession";
+import { toast } from "@/stores/toast-store";
 import type { SessionResponse, SessionStatus } from "@/types/session";
 
 function statusBadge(status: SessionStatus) {
@@ -56,8 +57,10 @@ export function SessionListContent({ onNavigate }: { onNavigate?: () => void }) 
   const [sessions, setSessions] = useState<SessionResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const activeSessionId = useSessionStore((s) => s.sessionId);
+  const chatSessionId = useChatStore((s) => s.sessionId);
   const clearChat = useChatStore((s) => s.clear);
   const resetSession = useSessionStore((s) => s.reset);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -73,7 +76,7 @@ export function SessionListContent({ onNavigate }: { onNavigate?: () => void }) 
     return () => {
       mounted = false;
     };
-  }, [pathname]);
+  }, [pathname, activeSessionId]);
 
   const startNew = () => {
     resetSessionPolling();
@@ -81,6 +84,39 @@ export function SessionListContent({ onNavigate }: { onNavigate?: () => void }) 
     resetSession();
     onNavigate?.();
     router.push("/chat");
+  };
+
+  const deleteSession = async (session: SessionResponse) => {
+    const confirmed = window.confirm(
+      `删除“${session.intent || "求职会话"}”？删除后无法恢复。`
+    );
+    if (!confirmed) return;
+
+    setDeletingSessionId(session.session_id);
+    try {
+      await sessionsApi.deleteSession(session.session_id);
+      setSessions((items) => items.filter((item) => item.session_id !== session.session_id));
+
+      const isOpenSession =
+        session.session_id === activeSessionId ||
+        session.session_id === chatSessionId ||
+        pathname === `/chat/${session.session_id}`;
+      if (isOpenSession) {
+        resetSessionPolling();
+        clearChat();
+        resetSession();
+        onNavigate?.();
+        router.replace("/chat");
+      }
+      toast.success("会话已删除");
+    } catch (error) {
+      toast.error(
+        "删除会话失败",
+        error instanceof Error ? error.message : "请稍后重试"
+      );
+    } finally {
+      setDeletingSessionId(null);
+    }
   };
 
   return (
@@ -111,24 +147,45 @@ export function SessionListContent({ onNavigate }: { onNavigate?: () => void }) 
             {sessions.map((s) => {
               const isActive = s.session_id === activeSessionId && pathname === "/chat";
               const isCurrent = pathname === `/chat/${s.session_id}`;
+              const isDeleting = deletingSessionId === s.session_id;
               return (
-                <Link
+                <div
                   key={s.session_id}
-                  href={isActive ? "/chat" : `/chat/${s.session_id}`}
-                  onClick={() => onNavigate?.()}
                   className={cn(
-                    "block rounded-lg border border-transparent px-3 py-2.5 transition-colors hover:bg-accent",
+                    "group relative rounded-lg border border-transparent transition-colors hover:bg-accent",
                     (isActive || isCurrent) && "border-primary/30 bg-accent"
                   )}
                 >
-                  <p className="truncate text-sm font-medium">{s.intent || "求职会话"}</p>
-                  <div className="mt-1.5 flex items-center justify-between gap-2">
-                    {statusBadge(s.status)}
-                    <span className="text-[10px] text-muted-foreground">
-                      {formatTime(s.started_at)}
-                    </span>
-                  </div>
-                </Link>
+                  <Link
+                    href={isActive ? "/chat" : `/chat/${s.session_id}`}
+                    onClick={() => onNavigate?.()}
+                    className="block px-3 py-2.5 pr-10"
+                  >
+                    <p className="truncate text-sm font-medium">{s.intent || "求职会话"}</p>
+                    <div className="mt-1.5 flex items-center justify-between gap-2">
+                      {statusBadge(s.status)}
+                      <span className="text-[10px] text-muted-foreground">
+                        {formatTime(s.started_at)}
+                      </span>
+                    </div>
+                  </Link>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground opacity-100 hover:bg-destructive/10 hover:text-destructive md:opacity-0 md:group-hover:opacity-100"
+                    onClick={() => void deleteSession(s)}
+                    disabled={isDeleting}
+                    title="删除会话"
+                    aria-label={`删除会话：${s.intent || "求职会话"}`}
+                  >
+                    {isDeleting ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-4 w-4" />
+                    )}
+                  </Button>
+                </div>
               );
             })}
           </div>

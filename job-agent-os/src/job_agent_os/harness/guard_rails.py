@@ -10,13 +10,17 @@ Guards:
 
 import logging
 from collections import defaultdict
+from typing import Any
 
+from pydantic import ValidationError
+
+from job_agent_os.graph.contracts import validate_node_output
 from job_agent_os.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 
-class GuardRailViolation(Exception):
+class GuardRailViolation(Exception):  # noqa: N818 - public API name
     """Raised when a guard rail is violated."""
 
     def __init__(self, guard_name: str, message: str) -> None:
@@ -29,11 +33,13 @@ class BaseGuard:
 
     name: str = "base"
 
-    def before_node(self, node_name: str, state: dict) -> None:
+    def before_node(self, node_name: str, state: dict[str, Any]) -> None:
         """Called before node execution. Raise GuardRailViolation to block."""
         pass
 
-    def after_node(self, node_name: str, state: dict, result: dict) -> None:
+    def after_node(
+        self, node_name: str, state: dict[str, Any], result: dict[str, Any]
+    ) -> None:
         """Called after node execution."""
         pass
 
@@ -56,14 +62,16 @@ class TokenBudgetGuard(BaseGuard):
         """Record token usage."""
         self.tokens_used += tokens
 
-    def before_node(self, node_name: str, state: dict) -> None:
+    def before_node(self, node_name: str, state: dict[str, Any]) -> None:
         if self.tokens_used >= self.max_tokens:
             raise GuardRailViolation(
                 self.name,
                 f"Token budget exceeded: {self.tokens_used}/{self.max_tokens}",
             )
 
-    def after_node(self, node_name: str, state: dict, result: dict) -> None:
+    def after_node(
+        self, node_name: str, state: dict[str, Any], result: dict[str, Any]
+    ) -> None:
         # Extract token usage from result if available
         token_usage = result.get("token_usage", {})
         if isinstance(token_usage, dict):
@@ -87,14 +95,16 @@ class StepLimitGuard(BaseGuard):
         self.max_steps = max_steps or settings.harness_max_steps
         self.step_count: int = 0
 
-    def before_node(self, node_name: str, state: dict) -> None:
+    def before_node(self, node_name: str, state: dict[str, Any]) -> None:
         if self.step_count >= self.max_steps:
             raise GuardRailViolation(
                 self.name,
                 f"Step limit exceeded: {self.step_count}/{self.max_steps}",
             )
 
-    def after_node(self, node_name: str, state: dict, result: dict) -> None:
+    def after_node(
+        self, node_name: str, state: dict[str, Any], result: dict[str, Any]
+    ) -> None:
         self.step_count += 1
 
     def reset(self) -> None:
@@ -111,7 +121,11 @@ class LoopDetectionGuard(BaseGuard):
         self.threshold = threshold or settings.harness_loop_detection_threshold
         self._node_counts: dict[str, int] = defaultdict(int)
 
-    def before_node(self, node_name: str, state: dict) -> None:
+    def before_node(self, node_name: str, state: dict[str, Any]) -> None:
+        # Supervisor normally appears between every specialist, so exclude it
+        # from repetition detection while retaining the last specialist name.
+        if node_name == "supervisor":
+            return
         self._node_counts[node_name] += 1
         if self._node_counts[node_name] > self.threshold:
             raise GuardRailViolation(
@@ -125,29 +139,34 @@ class LoopDetectionGuard(BaseGuard):
 
 
 class OutputValidationGuard(BaseGuard):
-    """Validates node output format."""
+    """Validate every core node against its runtime output contract."""
 
     name = "output_validation"
 
     def __init__(self, required_fields: list[str] | None = None) -> None:
         self.required_fields = required_fields or ["current_phase"]
 
-    def after_node(self, node_name: str, state: dict, result: dict) -> None:
+    def after_node(
+        self, node_name: str, state: dict[str, Any], result: dict[str, Any]
+    ) -> None:
         if not isinstance(result, dict):
             raise GuardRailViolation(
                 self.name,
                 f"Node '{node_name}' output is not a dict: {type(result).__name__}",
             )
-        # Soft validation: log warning but don't block
-        # (strict mode can raise GuardRailViolation)
         for field_name in self.required_fields:
             if field_name not in result:
-                logger.warning(
-                    "[%s] Node '%s' output missing required field '%s'",
+                raise GuardRailViolation(
                     self.name,
-                    node_name,
-                    field_name,
+                    f"Node '{node_name}' output missing required field '{field_name}'",
                 )
+        try:
+            validate_node_output(node_name, result)
+        except ValidationError as exc:
+            raise GuardRailViolation(
+                self.name,
+                f"Node '{node_name}' output failed schema validation: {exc.errors(include_url=False)}",
+            ) from exc
 
 
 class GuardRailChain:
@@ -163,12 +182,14 @@ class GuardRailChain:
             ]
         self.guards = guards
 
-    def before_node(self, node_name: str, state: dict) -> None:
+    def before_node(self, node_name: str, state: dict[str, Any]) -> None:
         """Run all guards before node execution."""
         for guard in self.guards:
             guard.before_node(node_name, state)
 
-    def after_node(self, node_name: str, state: dict, result: dict) -> None:
+    def after_node(
+        self, node_name: str, state: dict[str, Any], result: dict[str, Any]
+    ) -> None:
         """Run all guards after node execution."""
         for guard in self.guards:
             guard.after_node(node_name, state, result)

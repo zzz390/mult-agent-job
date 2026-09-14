@@ -1,14 +1,18 @@
 """Sessions endpoints."""
 
+import asyncio
+import json
 from uuid import UUID
 
 from fastapi import APIRouter, status
+from fastapi.responses import StreamingResponse
 
 from job_agent_os.api.deps import CurrentUser, DBSession
 from job_agent_os.api.response import success_response
 from job_agent_os.schemas.match import RecommendationFeedback
 from job_agent_os.schemas.session import SessionCreate, SessionMessage
 from job_agent_os.services.session_service import SessionService
+from job_agent_os.services.session_store import get_session_store
 
 router = APIRouter()
 
@@ -46,6 +50,22 @@ async def get_session(
     service = SessionService(db)
     session = await service.get_session(user, session_id)
     return success_response(data=session.model_dump(mode="json"))
+
+
+@router.delete("/{session_id}")
+async def delete_session(
+    session_id: UUID,
+    db: DBSession,
+    user: CurrentUser,
+) -> dict:
+    """Delete a session owned by the current user.
+
+    If it is still running, its graph task is cancelled before the session
+    record is removed.
+    """
+    service = SessionService(db)
+    result = await service.delete_session(user, session_id)
+    return success_response(data=result)
 
 
 @router.post("/{session_id}/messages")
@@ -123,3 +143,83 @@ async def submit_feedback(
     )
     return success_response(data=result)
 
+
+@router.get("/{session_id}/stream")
+async def stream_session(
+    session_id: UUID,
+    db: DBSession,
+    user: CurrentUser,
+) -> StreamingResponse:
+    """SSE stream of Agent execution progress (issue #4).
+
+    Pushes an event whenever the session's phase, status, or visible progress
+    changes, and a final `done` event when it reaches a terminal or waiting
+    state.
+    Replaces client-side polling.
+    """
+    service = SessionService(db)
+    # Validate ownership up front (raises 404 for foreign/unknown sessions)
+    await service.get_session(user, session_id)
+
+    store = get_session_store()
+    sid = str(session_id)
+
+    async def event_generator():
+        last_phase = None
+        last_status = None
+        last_progress = None
+        terminal = ("completed", "failed", "cancelled")
+        try:
+            while True:
+                info = await store.get(sid)
+                if not info:
+                    yield f"data: {json.dumps({'done': True, 'reason': 'session_gone'})}\n\n"
+                    break
+
+                current_phase = info.get("current_phase")
+                current_status = info.get("status")
+                progress = info.get("progress")
+                progress_fingerprint = json.dumps(
+                    progress, ensure_ascii=False, sort_keys=True, default=str
+                )
+                if (
+                    current_phase != last_phase
+                    or current_status != last_status
+                    or progress_fingerprint != last_progress
+                ):
+                    payload = {
+                        "phase": current_phase,
+                        "status": current_status,
+                        "progress": progress,
+                    }
+                    yield f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+                    last_phase = current_phase
+                    last_status = current_status
+                    last_progress = progress_fingerprint
+
+                if current_status in terminal or current_status in {
+                    "waiting_approval",
+                    "waiting_input",
+                }:
+                    final = {"done": True, "status": current_status}
+                    if current_status == "waiting_input":
+                        final["clarification_question"] = info.get(
+                            "results_summary", {}
+                        ).get("clarification_question")
+                    yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n"
+                    break
+
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            # Client disconnected — nothing to clean up
+            raise
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

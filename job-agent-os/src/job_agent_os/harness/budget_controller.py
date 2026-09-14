@@ -8,6 +8,7 @@ Real-time token counting with:
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from job_agent_os.settings import get_settings
 
@@ -52,7 +53,7 @@ class BudgetController:
         self.total_budget = budget or settings.harness_token_budget_per_session
         self.tokens_used: int = 0
         self._degraded: bool = False
-        self._history: deque[dict] = deque(maxlen=1000)
+        self._history: deque[dict[str, Any]] = deque(maxlen=1000)
 
     def record_usage(self, tokens: int, node_name: str = "") -> BudgetStatus:
         """Record token usage and return current status."""

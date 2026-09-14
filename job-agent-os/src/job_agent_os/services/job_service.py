@@ -147,6 +147,13 @@ class JobService:
         session_service = SessionService(self.db)
         session = await session_service.create_session(
             user,
-            SessionCreate(intent=intent, mode="search_only"),
+            SessionCreate(
+                intent=intent,
+                mode="search_only",
+                options={
+                    "structured_query": structured_query,
+                    "platforms": platforms or [],
+                },
+            ),
         )
         return session.session_id

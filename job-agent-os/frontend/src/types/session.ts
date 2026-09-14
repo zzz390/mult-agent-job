@@ -18,6 +18,14 @@ export interface SessionProgress {
   completed_steps: string[];
   current_step: string | null;
   pending_steps: string[];
+  /** The graph node currently executing, published by the backend runtime. */
+  active_agent?: string | null;
+  active_agent_status?: "running" | "completed" | "failed" | "waiting" | null;
+  /** Optional crawl-level activity details, when the active Agent exposes them. */
+  activity_message?: string | null;
+  items_found?: number | null;
+  items_saved?: number | null;
+  last_activity_at?: string | null;
 }
 
 export interface PendingApprovalInfo {
@@ -30,6 +38,7 @@ export type SessionStatus =
   | "created"
   | "running"
   | "waiting_approval"
+  | "waiting_input"
   | "completed"
   | "failed"
   | "cancelled";
@@ -45,6 +54,15 @@ export interface SessionResponse {
   token_usage: Record<string, number>;
   started_at: string | null;
   updated_at: string | null;
+}
+
+export interface SessionStreamEvent {
+  phase?: string | null;
+  status?: SessionStatus;
+  progress?: SessionProgress | null;
+  done?: boolean;
+  reason?: string;
+  clarification_question?: string | null;
 }
 
 export type MessageType = "text" | "clarification" | "feedback";

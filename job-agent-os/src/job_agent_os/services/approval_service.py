@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -21,7 +22,48 @@ from job_agent_os.schemas.approval import (
 logger = logging.getLogger(__name__)
 
 # Keep references to background tasks to prevent garbage collection
-_background_tasks: set[asyncio.Task] = set()
+_background_tasks: set[asyncio.Task[None]] = set()
+
+
+def _recommendation_key(item: object) -> tuple[str, str, str] | None:
+    """Build a stable key without trusting client-modified recommendation data."""
+    if not isinstance(item, dict):
+        return None
+    job = item.get("job", item)
+    if not isinstance(job, dict):
+        return None
+    job_id = str(job.get("id") or item.get("job_id") or "").strip()
+    title = str(job.get("title") or item.get("job_title") or "").strip()
+    company = str(job.get("company") or item.get("company") or "").strip()
+    if not job_id and not title and not company:
+        return None
+    return job_id, title, company
+
+
+def _select_reviewed_recommendations(
+    original: object, requested: object | None = None
+) -> list[dict[str, Any]]:
+    """Select/reorder only recommendations that were present in the review."""
+    source = [item for item in original if isinstance(item, dict)] if isinstance(original, list) else []
+    if requested is None:
+        return source
+    if not isinstance(requested, list):
+        return []
+
+    by_key = {
+        key: item
+        for item in source
+        if (key := _recommendation_key(item)) is not None
+    }
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for candidate in requested:
+        key = _recommendation_key(candidate)
+        if key is None or key in seen or key not in by_key:
+            continue
+        selected.append(by_key[key])
+        seen.add(key)
+    return selected
 
 
 async def _resume_session_background(session_id: str) -> None:
@@ -34,8 +76,13 @@ async def _resume_session_background(session_id: str) -> None:
 
     session_factory = get_session_factory()
     async with session_factory() as session:
-        service = SessionService(session)
-        await service.resume_session(session_id)
+        try:
+            service = SessionService(session)
+            await service.resume_session(session_id)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 class ApprovalService:
@@ -85,13 +132,44 @@ class ApprovalService:
         self, user: User, approval_id: UUID, data: ApprovalRespondRequest
     ) -> HumanApproval:
         """Respond to an approval request."""
-        approval = await self.get_approval(user, approval_id)
+        # Serialize competing responses so an approval can resume the graph
+        # only once even when requests arrive on different workers.
+        result = await self.db.execute(
+            select(HumanApproval)
+            .where(
+                HumanApproval.id == approval_id,
+                HumanApproval.user_id == user.id,
+            )
+            .with_for_update()
+        )
+        approval = result.scalar_one_or_none()
+        if not approval:
+            raise NotFoundException(
+                message="Approval not found",
+                code=ErrorCode.APPROVAL_NOT_FOUND,
+            )
 
         if approval.status != "pending":
             raise ValidationException(
                 message="Approval has already been processed",
                 code=ErrorCode.APPROVAL_ALREADY_PROCESSED,
             )
+
+        if data.action == "modify" and not data.modified_payload:
+            raise ValidationException(
+                message="modified_payload is required when action is modify",
+                code=ErrorCode.VALIDATION_FAILED,
+            )
+
+        if approval.approval_type == "recommendation_review" and data.action == "modify":
+            payload = getattr(approval, "payload", None)
+            original = payload.get("recommendations", []) if isinstance(payload, dict) else []
+            requested = (data.modified_payload or {}).get("recommendations", [])
+            if not _select_reviewed_recommendations(original, requested):
+                raise ValidationException(
+                    message="At least one reviewed recommendation must be selected",
+                    code=ErrorCode.VALIDATION_FAILED,
+                )
 
         # Update approval
         approval.status = "responded"
@@ -116,38 +194,105 @@ class ApprovalService:
 
         session_id = str(approval.session_id)
 
-        try:
-            graph = get_main_graph()
-            config = {"configurable": {"thread_id": session_id}}
+        graph = get_main_graph()
+        config = {"configurable": {"thread_id": session_id}}
 
-            # Build state update based on approval type and user action
-            state_update: dict = {"pending_approval": None}
+        # Build state update based on approval type and user action
+        state_update: dict[str, Any] = {"pending_approval": None}
 
-            if approval.approval_type == "resume_approval":
-                state_update["resume_approved"] = data.action == "approve"
-                state_update["human_feedback"] = data.action
-            elif approval.approval_type == "recommendation_review":
-                state_update["human_feedback"] = data.action
-                if data.action == "reject":
-                    state_update["human_feedback"] = "reject - re-match"
-            else:
-                state_update["human_feedback"] = data.action
+        if approval.approval_type == "resume_approval":
+            state_update["resume_approved"] = data.action in ("approve", "modify")
+            state_update["human_feedback"] = data.feedback or data.action
+            if data.action == "modify" and data.modified_payload:
+                state_update["optimized_resume"] = data.modified_payload.get(
+                    "optimized_resume", data.modified_payload
+                )
+        elif approval.approval_type == "recommendation_review":
+            state_update["human_feedback"] = data.feedback or data.action
+            payload = getattr(approval, "payload", None)
+            original = payload.get("recommendations", []) if isinstance(payload, dict) else []
+            if data.action == "modify" and data.modified_payload:
+                recommendations = data.modified_payload.get("recommendations", [])
+                state_update["approved_recommendations"] = (
+                    _select_reviewed_recommendations(original, recommendations)
+                )
+            elif data.action in ("approve", "skip"):
+                state_update["approved_recommendations"] = (
+                    _select_reviewed_recommendations(original)
+                )
+        else:
+            state_update["human_feedback"] = data.feedback or data.action
 
-            # Update graph checkpoint state with user's decision
+        reroute_agent: str | None = None
+        if data.action == "reject":
+            # Rejection means "revise this stage", not "silently finish".
+            # Resume from the Supervisor routing edge so the interrupted next
+            # node is replaced by the stage that produced the rejected result.
+            state_update["is_finished"] = False
+            if approval.approval_type == "recommendation_review":
+                reroute_agent = "match"
+                state_update.update(
+                    {
+                        "match_results": [],
+                        "approved_recommendations": None,
+                        "optimized_resume": None,
+                        "resume_diff": [],
+                        "interview_questions": [],
+                        "applications": [],
+                        "kanban_state": {},
+                    }
+                )
+            elif approval.approval_type == "resume_approval":
+                reroute_agent = "resume"
+                state_update.update(
+                    {
+                        "optimized_resume": None,
+                        "resume_diff": [],
+                        "resume_approved": False,
+                        "interview_questions": [],
+                        "applications": [],
+                        "kanban_state": {},
+                    }
+                )
+
+            if reroute_agent:
+                feedback = data.feedback or "用户拒绝了当前结果，请生成不同的版本"
+                state_update.update(
+                    {
+                        "next_agent": reroute_agent,
+                        "task_instruction": feedback,
+                        "human_feedback": feedback,
+                    }
+                )
+
+        # Only rejected stage results need an explicit routing override;
+        # approve/modify/skip naturally continue from the interrupt point.
+        if reroute_agent:
+            await graph.aupdate_state(config, state_update, as_node="supervisor")
+        else:
             await graph.aupdate_state(config, state_update)
 
-            # Resume execution in background with independent DB session
-            task = asyncio.create_task(_resume_session_background(session_id))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
-        except Exception:
-            logger.exception("Failed to resume session after approval")
+        from job_agent_os.services.session_store import get_session_store
+
+        store = get_session_store()
+        await store.update(
+            session_id,
+            status="running",
+            current_phase=reroute_agent or approval.approval_type,
+            pending_approval=None,
+            updated_at=utc_now().isoformat(),
+        )
+
+        # Resume execution in background with independent DB session.
+        task = asyncio.create_task(_resume_session_background(session_id))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
     async def batch_respond(
         self, user: User, data: BatchApprovalRequest
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Batch respond to multiple approvals."""
-        results = []
+        results: list[dict[str, Any]] = []
         for item in data.approvals:
             try:
                 approval = await self.respond_to_approval(

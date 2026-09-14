@@ -9,6 +9,7 @@ Provides:
 """
 
 import importlib
+import logging
 import pkgutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -156,19 +159,22 @@ def discover_tools() -> None:
     import job_agent_os.tools as tools_pkg
 
     package_path = tools_pkg.__path__
-    for importer, module_name, is_pkg in pkgutil.walk_packages(
+    for _importer, module_name, _is_pkg in pkgutil.walk_packages(
         package_path, prefix="job_agent_os.tools."
     ):
         if module_name.endswith("__init__") or module_name.endswith("registry"):
             continue
         try:
             importlib.import_module(module_name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to import tool module %s: %s", module_name, e)
 
 
 def register_builtin_tools() -> None:
     """Manually register built-in tools that aren't decorated."""
+    # --- Schemas for builtin tools ---
+    from pydantic import Field
+
     from job_agent_os.tools.common.dedup import dedup_jobs
     from job_agent_os.tools.interview.behavior_question_gen import generate_behavior_questions
     from job_agent_os.tools.interview.tech_question_gen import generate_tech_questions
@@ -177,9 +183,6 @@ def register_builtin_tools() -> None:
     from job_agent_os.tools.parse.html_parser import fetch_and_extract_html
     from job_agent_os.tools.parse.jd_structurer import structure_jd
     from job_agent_os.tools.resume.keyword_optimizer import optimize_resume_keywords
-
-    # --- Schemas for builtin tools ---
-    from pydantic import Field
 
     class DedupInput(BaseModel):
         """去重工具输入"""
@@ -222,7 +225,9 @@ def register_builtin_tools() -> None:
     class BehaviorQuestionInput(BaseModel):
         """行为面试题生成工具输入"""
         job_title: str = Field(description="目标岗位名称")
-        experiences: list[str] = Field(default_factory=list, description="用户项目/实习经历摘要")
+        project_experience: str = Field(
+            default="", description="用户项目/实习经历摘要"
+        )
         count: int = Field(default=5, description="生成题目数量")
 
     class PlatformSearchInput(BaseModel):
@@ -366,7 +371,3 @@ def init_registry() -> None:
     """Initialize the tool registry: discover + register builtins."""
     discover_tools()
     register_builtin_tools()
-
-
-# Auto-initialize on import
-init_registry()

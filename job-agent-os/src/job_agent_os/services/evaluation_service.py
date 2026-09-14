@@ -1,6 +1,7 @@
 """Evaluation service."""
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +21,7 @@ class EvaluationService:
         user: User,
         days: int = 30,
         agent: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get evaluation report with date filtering.
 
         Args:
@@ -38,7 +39,9 @@ class EvaluationService:
             Evaluation.agent_name,
             Evaluation.metric_name,
             func.avg(Evaluation.score).label("avg_score"),
-            func.count(Evaluation.id).label("count"),
+            # Avoid ``count``: SQLAlchemy Row also exposes tuple.count(), so
+            # attribute access can resolve to a method instead of this column.
+            func.count(Evaluation.id).label("evaluation_count"),
         ).where(Evaluation.created_at >= cutoff)
 
         if agent:
@@ -60,9 +63,10 @@ class EvaluationService:
         ]
 
         # Summary
-        total_evals = sum(r.count for r in rows) if rows else 0
+        total_evals = sum(int(r.evaluation_count) for r in rows) if rows else 0
         overall_avg = (
-            sum(float(r.avg_score) * r.count for r in rows) / total_evals
+            sum(float(r.avg_score) * int(r.evaluation_count) for r in rows)
+            / total_evals
             if total_evals > 0 and rows
             else 0.0
         )

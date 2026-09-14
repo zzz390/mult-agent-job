@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from job_agent_os.harness.eval.judges import BaseJudge, LLMJudge, RuleBasedJudge
-from job_agent_os.harness.eval.metrics import MetricResult, accuracy, coverage
+from job_agent_os.harness.eval.judges import BaseJudge, RuleBasedJudge
+from job_agent_os.harness.eval.metrics import MetricResult
 
 
 @dataclass
@@ -175,7 +175,7 @@ class EvalEngine:
 
         # Find regressions (cases that passed before but fail now)
         regressions = []
-        for base_r, curr_r in zip(baseline.results, current.results):
+        for base_r, curr_r in zip(baseline.results, current.results, strict=False):
             if base_r.passed and not curr_r.passed:
                 regressions.append({
                     "case_index": curr_r.case_index,

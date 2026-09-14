@@ -12,19 +12,49 @@ const QUICK_TEMPLATES = [
   "深圳 大厂 算法",
 ];
 
-interface ChatInputProps {
-  onSend: (content: string) => void;
-  disabled?: boolean;
-  placeholder?: string;
+const PLATFORM_OPTIONS = [
+  { value: "boss", label: "BOSS 直聘" },
+  { value: "guopin", label: "国聘" },
+  { value: "niuke", label: "牛客" },
+] as const;
+
+export interface ChatSendOptions {
+  platforms?: string[];
 }
 
-export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
+interface ChatInputProps {
+  onSend: (content: string, options?: ChatSendOptions) => void;
+  disabled?: boolean;
+  placeholder?: string;
+  /** Platform choices only apply when the message will create a new session. */
+  platformSelectionAvailable?: boolean;
+}
+
+export function ChatInput({
+  onSend,
+  disabled,
+  placeholder,
+  platformSelectionAvailable = true,
+}: ChatInputProps) {
   const [value, setValue] = useState("");
+  const [platforms, setPlatforms] = useState<string[]>([]);
+
+  const togglePlatform = (platform: string) => {
+    setPlatforms((selected) =>
+      selected.includes(platform)
+        ? selected.filter((item) => item !== platform)
+        : [...selected, platform]
+    );
+  };
 
   const submit = () => {
     if (!value.trim() || disabled) return;
-    onSend(value.trim());
+    onSend(
+      value.trim(),
+      platforms.length > 0 ? { platforms: [...platforms] } : undefined
+    );
     setValue("");
+    setPlatforms([]);
   };
 
   return (
@@ -42,6 +72,39 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
             {tpl}
           </button>
         ))}
+      </div>
+
+      {/* Optional explicit sources. No selection preserves official-first search. */}
+      <div
+        className="mb-3 flex flex-wrap items-center gap-2"
+        role="group"
+        aria-label="扩展招聘平台，可多选"
+        aria-describedby="platform-selection-hint"
+      >
+        <span className="text-xs font-medium text-muted-foreground">
+          扩展平台（可多选）
+        </span>
+        {PLATFORM_OPTIONS.map((platform) => {
+          const selected = platforms.includes(platform.value);
+          return (
+            <button
+              key={platform.value}
+              type="button"
+              onClick={() => togglePlatform(platform.value)}
+              disabled={disabled || !platformSelectionAvailable}
+              aria-pressed={selected}
+              className="rounded-full border px-3 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 data-[selected=true]:border-primary data-[selected=true]:bg-primary/10 data-[selected=true]:text-primary"
+              data-selected={selected}
+            >
+              {platform.label}
+            </button>
+          );
+        })}
+        <span id="platform-selection-hint" className="text-[11px] text-muted-foreground">
+          {platformSelectionAvailable
+            ? "不选则优先搜索企业官网"
+            : "仅新会话可选择平台"}
+        </span>
       </div>
 
       <div className="flex gap-2">

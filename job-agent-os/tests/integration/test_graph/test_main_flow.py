@@ -38,7 +38,7 @@ class TestSupervisorRouting:
 
     def test_route_to_all_valid_agents(self):
         """Should correctly route to all valid specialist agents."""
-        valid_agents = ["intent", "search", "web_search", "parse", "match", "resume", "interview", "tracker"]
+        valid_agents = ["intent", "search", "match", "resume", "interview"]
         for agent in valid_agents:
             state: JobAgentState = {"next_agent": agent, "is_finished": False}
             assert route_from_supervisor(state) == agent
@@ -71,19 +71,12 @@ class TestGraphBuild:
         graph_repr = graph.get_graph()
         node_ids = list(graph_repr.nodes.keys())
 
-        expected_nodes = [
-            "supervisor",
-            "intent",
-            "search",
-            "web_search",
-            "parse",
-            "match",
-            "resume",
-            "interview",
-            "tracker",
-        ]
+        expected_nodes = ["supervisor", "intent", "search", "match", "resume", "interview"]
         for node_name in expected_nodes:
             assert node_name in node_ids, f"Node '{node_name}' not found in graph"
+
+        for merged_node in ("web_search", "parse", "tracker"):
+            assert merged_node not in node_ids
 
     def test_graph_has_no_old_hitl_nodes(self):
         """Graph should NOT contain old HITL nodes."""

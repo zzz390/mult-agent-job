@@ -35,41 +35,42 @@ def match_skills(job_skills: list[str], user_skills: list[str]) -> dict:
 
 
 def _is_skill_matched(skill: str, user_skills: set[str]) -> bool:
-    """Check if a skill matches any user skill (exact + fuzzy)."""
+    """Check a normalized skill using exact names and explicit aliases.
+
+    Arbitrary substring matching is intentionally excluded: short skills such
+    as ``go``, ``c`` and ``r`` otherwise match unrelated names like Django.
+    """
     # Exact match
     if skill in user_skills:
         return True
 
-    # Fuzzy: check if skill is substring of any user skill or vice versa
-    for user_skill in user_skills:
-        if skill in user_skill or user_skill in skill:
-            return True
-
     # Common aliases
-    aliases: dict[str, list[str]] = {
-        "springboot": ["spring boot", "spring-boot", "spring"],
-        "spring": ["springboot", "spring boot", "spring-boot"],
-        "js": ["javascript"],
-        "javascript": ["js"],
-        "ts": ["typescript"],
-        "typescript": ["ts"],
-        "py": ["python"],
-        "python": ["py"],
-        "k8s": ["kubernetes"],
-        "kubernetes": ["k8s"],
-        "postgres": ["postgresql"],
-        "postgresql": ["postgres"],
-        "mysql": ["sql"],
-        "vue": ["vuejs", "vue.js"],
-        "react": ["reactjs", "react.js"],
+    aliases: dict[str, set[str]] = {
+        "springboot": {"spring boot", "spring-boot"},
+        "spring boot": {"springboot", "spring-boot"},
+        "spring-boot": {"springboot", "spring boot"},
+        "js": {"javascript"},
+        "javascript": {"js"},
+        "ts": {"typescript"},
+        "typescript": {"ts"},
+        "py": {"python"},
+        "python": {"py"},
+        "go": {"golang"},
+        "golang": {"go"},
+        "k8s": {"kubernetes"},
+        "kubernetes": {"k8s"},
+        "postgres": {"postgresql"},
+        "postgresql": {"postgres"},
+        "vue": {"vuejs", "vue.js"},
+        "vuejs": {"vue", "vue.js"},
+        "vue.js": {"vue", "vuejs"},
+        "react": {"reactjs", "react.js"},
+        "reactjs": {"react", "react.js"},
+        "react.js": {"react", "reactjs"},
     }
 
-    skill_aliases = aliases.get(skill, [])
-    for alias in skill_aliases:
-        if alias in user_skills:
-            return True
-
-    return False
+    skill_aliases = aliases.get(skill, set())
+    return any(alias in user_skills for alias in skill_aliases)
 
 
 def compute_skill_score(job_skills: list[str], user_skills: list[str]) -> float:

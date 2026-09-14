@@ -3,7 +3,7 @@
 from typing import Any
 
 
-class AppException(Exception):
+class AppException(Exception):  # noqa: N818 - compatibility with public API
     """Base application exception."""
 
     def __init__(

@@ -1,4 +1,4 @@
-/** Auth store - manages token + user state with localStorage persistence. */
+/** Auth store - access credentials live only for the current browser tab. */
 
 import { create } from "zustand";
 import { loadTokens, setTokens } from "@/lib/api/client";
@@ -48,7 +48,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     if (typeof window !== "undefined") {
       const userId = localStorage.getItem("user_id");
       const username = localStorage.getItem("username");
-      const access = localStorage.getItem("access_token");
+      const access = sessionStorage.getItem("access_token");
       if (userId && access) {
         set({ userId, username, isAuthenticated: true, isHydrated: true });
         return;

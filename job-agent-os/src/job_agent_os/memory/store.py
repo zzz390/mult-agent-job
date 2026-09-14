@@ -5,6 +5,7 @@ for CRUD operations and semantic search over user memories.
 """
 
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -98,10 +99,8 @@ class PostgresMemoryStore(MemoryStore):
         # Generate embedding from content text
         content_text = self._content_to_text(content)
         embedding = None
-        try:
+        with suppress(Exception):
             embedding = await self.embedding_service.embed_text(content_text)
-        except Exception:
-            pass  # Embedding failure shouldn't block memory save
 
         if existing:
             # Update existing
@@ -188,7 +187,6 @@ class PostgresMemoryStore(MemoryStore):
             # Fallback to keyword search if embedding fails
             return await self._keyword_search(user_id, query, category, top_k)
 
-        from sqlalchemy import text as sa_text
 
         embedding_str = f"[{','.join(str(x) for x in query_embedding)}]"
 
@@ -213,10 +211,11 @@ class PostgresMemoryStore(MemoryStore):
         self, user_id: UUID, query: str, category: str | None, top_k: int
     ) -> list[Memory]:
         """Fallback keyword search when embedding is unavailable."""
+        escaped_query = query.replace("%", "\\%").replace("_", "\\_")
         stmt = select(Memory).where(
             Memory.user_id == user_id,
             Memory.is_active == True,  # noqa: E712
-            Memory.content_text.ilike(f"%{query}%"),
+            Memory.content_text.ilike(f"%{escaped_query}%"),
         )
         if category:
             stmt = stmt.where(Memory.category == category)
@@ -243,7 +242,7 @@ class PostgresMemoryStore(MemoryStore):
     def _content_to_text(self, content: dict) -> str:
         """Convert content dict to searchable text."""
         parts = []
-        for key, value in content.items():
+        for _key, value in content.items():
             if isinstance(value, str):
                 parts.append(value)
             elif isinstance(value, list):

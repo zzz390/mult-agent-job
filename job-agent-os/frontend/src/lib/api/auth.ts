@@ -11,10 +11,10 @@ export function login(data: LoginRequest) {
   return api.post<TokenResponse>("/v1/auth/login", data, { noAuth: true });
 }
 
-export function refreshToken(refresh_token: string) {
+export function refreshToken() {
   return api.post<TokenResponse>(
     "/v1/auth/refresh",
-    { refresh_token },
+    {},
     { noAuth: true }
   );
 }

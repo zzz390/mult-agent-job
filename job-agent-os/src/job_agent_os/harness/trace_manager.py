@@ -13,7 +13,14 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from job_agent_os.core.privacy import redact_pii
 from job_agent_os.models.agent_log import AgentLog
+
+_SENSITIVE_TEXT_FIELDS = {
+    "optimized_resume",
+    "human_feedback",
+    "raw_content",
+}
 
 
 class TraceManager:
@@ -26,9 +33,9 @@ class TraceManager:
     def __init__(self, db: AsyncSession | None = None) -> None:
         self.db = db
         self._step_counter: int = 0
-        self._active_spans: dict[str, dict] = {}
+        self._active_spans: dict[str, dict[str, Any]] = {}
         self._trace_id: str = str(uuid4())[:16]
-        self._logs: list[dict] = []
+        self._logs: list[dict[str, Any]] = []
 
     def reset(self) -> None:
         """Reset trace state for a new session."""
@@ -45,7 +52,7 @@ class TraceManager:
         self,
         node_name: str,
         agent_name: str,
-        input_data: dict | None = None,
+        input_data: dict[str, Any] | None = None,
         session_id: UUID | None = None,
         user_id: UUID | None = None,
     ) -> str:
@@ -73,13 +80,13 @@ class TraceManager:
     def on_node_end(
         self,
         span_id: str,
-        output_data: dict | None = None,
-        token_usage: dict | None = None,
+        output_data: dict[str, Any] | None = None,
+        token_usage: dict[str, Any] | None = None,
         model_name: str | None = None,
         status: str = "success",
         error_message: str | None = None,
         error_type: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Record node execution end.
 
         Args:
@@ -100,9 +107,11 @@ class TraceManager:
         # Derive error_type from error_message only as a last resort
         if error_message and not error_type:
             error_type = "Error"
+        if error_message:
+            error_message = str(redact_pii(error_message))[:500]
 
         tokens = token_usage or {}
-        log_entry = {
+        log_entry: dict[str, Any] = {
             "trace_id": self._trace_id,
             "session_id": span.get("session_id"),
             "user_id": span.get("user_id"),
@@ -127,7 +136,7 @@ class TraceManager:
         self._logs.append(log_entry)
         return log_entry
 
-    def on_node_error(self, span_id: str, error: Exception) -> dict:
+    def on_node_error(self, span_id: str, error: Exception) -> dict[str, Any]:
         """Record node execution error."""
         return self.on_node_end(
             span_id=span_id,
@@ -136,17 +145,17 @@ class TraceManager:
             error_type=type(error).__name__,
         )
 
-    def get_logs(self) -> list[dict]:
+    def get_logs(self) -> list[dict[str, Any]]:
         """Get all recorded log entries."""
         return self._logs.copy()
 
     def get_total_tokens(self) -> int:
         """Get total tokens used across all steps."""
-        return sum(log.get("total_tokens", 0) for log in self._logs)
+        return sum(int(log.get("total_tokens", 0) or 0) for log in self._logs)
 
     def get_total_duration_ms(self) -> int:
         """Get total execution duration."""
-        return sum(log.get("duration_ms", 0) for log in self._logs)
+        return sum(int(log.get("duration_ms", 0) or 0) for log in self._logs)
 
     async def flush_to_db(self) -> int:
         """Write all pending logs to agent_logs table.
@@ -158,7 +167,7 @@ class TraceManager:
             return 0
 
         count = 0
-        skipped: list[dict] = []
+        skipped: list[dict[str, Any]] = []
         for log in self._logs:
             if not log.get("session_id") or not log.get("user_id"):
                 skipped.append(log)
@@ -195,16 +204,24 @@ class TraceManager:
         self._logs = skipped
         return count
 
-    def _safe_snapshot(self, data: Any) -> dict | None:
+    def _safe_snapshot(self, data: Any) -> dict[str, Any] | None:
         """Create a safe JSON-serializable snapshot of data."""
         if data is None:
             return None
         if isinstance(data, dict):
             # Limit snapshot size
-            result = {}
+            result: dict[str, Any] = {}
             for k, v in list(data.items())[:20]:
+                if k in _SENSITIVE_TEXT_FIELDS and isinstance(v, str):
+                    result[k] = f"[redacted-text:{len(v)} chars]"
+                    continue
                 if isinstance(v, (str, int, float, bool, type(None))):
-                    result[k] = v
+                    safe_value = redact_pii(v)
+                    result[k] = (
+                        safe_value[:500]
+                        if isinstance(safe_value, str)
+                        else safe_value
+                    )
                 elif isinstance(v, list):
                     result[k] = f"[list:{len(v)} items]"
                 elif isinstance(v, dict):
@@ -212,4 +229,4 @@ class TraceManager:
                 else:
                     result[k] = str(type(v).__name__)
             return result
-        return {"_raw": str(data)[:500]}
+        return {"_raw": str(redact_pii(data))[:500]}

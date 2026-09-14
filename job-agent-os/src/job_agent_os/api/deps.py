@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from job_agent_os.core.exceptions import UnauthorizedException
-from job_agent_os.core.security import decode_token
+from job_agent_os.core.security import decode_token, is_token_revoked
 from job_agent_os.db.redis import get_redis
 from job_agent_os.db.session import get_db_session
 from job_agent_os.models.user import User
@@ -23,8 +23,8 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def get_current_user(
+    db: Annotated[AsyncSession, Depends(get_db)],
     authorization: Annotated[str | None, Header()] = None,
-    db: AsyncSession = Depends(get_db),
 ) -> User:
     """Get current authenticated user from JWT token."""
     if not authorization or not authorization.startswith("Bearer "):
@@ -35,6 +35,8 @@ async def get_current_user(
 
     if payload.get("type") != "access":
         raise UnauthorizedException(message="Invalid token type")
+    if await is_token_revoked(payload):
+        raise UnauthorizedException(message="Token has been revoked")
 
     user_id = payload.get("sub")
     if not user_id:

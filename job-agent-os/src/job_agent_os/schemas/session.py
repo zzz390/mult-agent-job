@@ -21,6 +21,18 @@ class SessionProgress(BaseModel):
     completed_steps: list[str] = Field(default_factory=list)
     current_step: str | None = None
     pending_steps: list[str] = Field(default_factory=list)
+    # Updated by HarnessRuntime when a graph node starts/finishes.  Keeping
+    # this separate from ``current_step`` lets clients state plainly which
+    # Agent is working without having to infer it from a pipeline position.
+    active_agent: str | None = None
+    active_agent_status: str | None = None
+    # Fine-grained, user-safe activity published by long-running search work.
+    # These are intentionally aggregate values; source URLs and raw crawler
+    # output never belong in an SSE/session progress payload.
+    activity_message: str | None = None
+    items_found: int = 0
+    items_saved: int = 0
+    last_activity_at: str | None = None
 
 
 class PendingApprovalInfo(BaseModel):

@@ -143,27 +143,20 @@ async def search_memories(
 ) -> dict:
     """Semantic search over memories.
 
-    In full implementation (Phase 5), this would use vector similarity search.
-    For now, performs keyword-based search on content_text.
+    Uses the vector similarity search implemented in PostgresMemoryStore
+    (issue #5: the pgvector implementation was previously dead code here).
+    Falls back to keyword search automatically when embeddings are
+    unavailable (handled inside the store).
     """
-    query = select(Memory).where(
-        Memory.user_id == user.id,
-        Memory.is_active == True,  # noqa: E712
+    from job_agent_os.memory.store import PostgresMemoryStore
+
+    store = PostgresMemoryStore(db)
+    memories = await store.search_memories(
+        user_id=user.id,
+        query=request.query,
+        category=request.category,
+        top_k=request.top_k,
     )
-
-    if request.category:
-        query = query.where(Memory.category == request.category)
-
-    # Simple text search (will be replaced by vector search in Phase 5)
-    query = query.where(
-        Memory.content_text.ilike(f"%{request.query}%")
-        | Memory.key.ilike(f"%{request.query}%")
-    )
-
-    query = query.order_by(Memory.importance_score.desc()).limit(request.top_k)
-
-    result = await db.execute(query)
-    memories = list(result.scalars().all())
 
     items = [
         MemoryResponse.model_validate(m).model_dump(mode="json") for m in memories

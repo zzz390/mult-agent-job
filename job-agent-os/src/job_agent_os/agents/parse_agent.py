@@ -1,10 +1,17 @@
-"""Parse Agent - Structure raw job descriptions using LLM (ReAct mode)."""
+"""Parse Agent - Structure raw job descriptions using LLM (concurrent mode).
+
+Issue #9: Previously this agent relied on the ReAct loop to call
+jd_structurer one job at a time — N jobs meant N serial LLM round trips
+(30-60s for 20 results). It now structures jobs directly with
+asyncio.gather + a semaphore for bounded concurrency.
+"""
 
 import json
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from job_agent_os.agents.base import BaseAgent
+from job_agent_os.core.json_utils import extract_json_array
 from job_agent_os.graph.state import JobAgentState
 
 PARSE_SYSTEM_PROMPT = """你是JD（岗位描述）结构化解析专家。你的任务是将原始岗位数据结构化为标准格式。
@@ -24,12 +31,42 @@ title, company, location, salary, skills_required, education, responsibilities, 
 
 
 class ParseAgent(BaseAgent):
-    """Parse Agent structures raw job data into standard JD format (ReAct)."""
+    """Parse Agent structures raw job data into standard JD format.
+
+    Primary path: direct concurrent structuring via structure_jds_parallel
+    (deterministic, fast). The ReAct loop remains as a fallback.
+    """
 
     name = "parse"
     system_prompt = PARSE_SYSTEM_PROMPT
     agent_tools = ["jd_structurer", "html_parser"]
     max_iterations = 6
+
+    # Max jobs structured in one pass (kept in sync with previous behavior)
+    max_jobs_per_run = 15
+
+    async def execute(self, state: JobAgentState) -> dict:
+        """Structure search results concurrently (issue #9).
+
+        Falls back to the classic ReAct loop only if the direct path fails.
+        """
+        search_results = state.get("search_results", [])
+        jobs_to_parse = search_results[: self.max_jobs_per_run]
+
+        if jobs_to_parse:
+            try:
+                from job_agent_os.tools.parse.jd_structurer import structure_jds_parallel
+
+                parsed_jobs, parse_failures = await structure_jds_parallel(jobs_to_parse)
+                return {
+                    "current_phase": "parse",
+                    "parsed_jobs": parsed_jobs,
+                    "parse_failures": parse_failures,
+                }
+            except Exception:  # noqa: BLE001 - keep ReAct path as safety net
+                pass
+
+        return await super().execute(state)
 
     def _build_initial_messages(self, state: JobAgentState) -> list[BaseMessage]:
         """Build parse task from search_results."""
@@ -75,12 +112,10 @@ class ParseAgent(BaseAgent):
             content = self._get_last_ai_content(messages)
             if content:
                 try:
-                    if "[" in content:
-                        json_str = content[content.index("["):content.rindex("]") + 1]
-                        parsed = json.loads(json_str)
-                        if isinstance(parsed, list):
-                            parsed_jobs = [j for j in parsed if isinstance(j, dict) and j.get("title")]
-                except (json.JSONDecodeError, ValueError):
+                    parsed = extract_json_array(content)
+                    if isinstance(parsed, list):
+                        parsed_jobs = [j for j in parsed if isinstance(j, dict) and j.get("title")]
+                except ValueError:
                     pass
 
         # If still nothing, pass through search_results as-is (basic structure)

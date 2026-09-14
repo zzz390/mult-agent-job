@@ -36,8 +36,7 @@ Thumbs.db
 htmlcov/
 .mypy_cache/
 
-# uv
-uv.lock
+# Keep uv.lock in version control so Docker's --frozen install is reproducible.
 
 # Database
 *.db
@@ -49,6 +48,7 @@ uploads/
 # Logs
 *.log
 logs/
+runs/
 
 # Alembic
 alembic.ini

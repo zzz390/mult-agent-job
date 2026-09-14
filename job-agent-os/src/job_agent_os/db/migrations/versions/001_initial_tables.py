@@ -59,7 +59,7 @@ def upgrade() -> None:
         sa.Column("chunks", postgresql.JSONB, server_default="[]"),
         sa.Column("target_direction", sa.String(100), nullable=True),
         sa.Column("is_active", sa.Boolean, server_default="true"),
-        sa.Column("is_encrypted", sa.Boolean, server_default="true"),
+        sa.Column("is_encrypted", sa.Boolean, server_default="false"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )

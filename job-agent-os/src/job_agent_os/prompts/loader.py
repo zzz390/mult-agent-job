@@ -1,6 +1,5 @@
 """Prompt loader (YAML file + DB dual source)."""
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +38,7 @@ def load_prompt(key: str, variables: dict[str, Any] | None = None) -> tuple[str,
         # Return default prompts if file not found
         return (
             f"You are a helpful assistant for {key}.",
-            f"Please process the following: {{{{ input }}}}",
+            "Please process the following: {{ input }}",
         )
 
     with open(file_path, encoding="utf-8") as f:

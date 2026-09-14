@@ -1,11 +1,30 @@
-"""Interview Agent - Generate interview questions (ReAct mode)."""
+"""Interview Agent - generate interview questions concurrently.
 
+Issue #2 (agent consolidation): after generating interview questions this
+agent also creates application records + kanban state (formerly the
+separate `tracker` agent), removing one Supervisor round trip.
+"""
+
+import asyncio
 import json
+import logging
+from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from job_agent_os.agents.base import BaseAgent
+from job_agent_os.core.json_utils import extract_json_array
+from job_agent_os.core.llm_usage import empty_token_usage, merge_token_usage
+from job_agent_os.core.privacy import redact_pii
+from job_agent_os.graph.selectors import selected_recommendations
 from job_agent_os.graph.state import JobAgentState
+from job_agent_os.settings import get_settings
+from job_agent_os.tools.interview.behavior_question_gen import (
+    generate_behavior_questions,
+)
+from job_agent_os.tools.interview.tech_question_gen import generate_tech_questions
+
+logger = logging.getLogger(__name__)
 
 INTERVIEW_SYSTEM_PROMPT = """你是面试题生成专家。你的任务是根据目标岗位生成面试题。
 
@@ -23,17 +42,132 @@ id, type(technical/behavioral), category, difficulty, question, reference_answer
 
 
 class InterviewAgent(BaseAgent):
-    """Interview Agent generates interview questions (ReAct)."""
+    """Interview Agent generates questions and initializes application tracking.
+
+    Also creates application records and kanban state (formerly the
+    separate tracker agent, issue #2).
+    """
 
     name = "interview"
     system_prompt = INTERVIEW_SYSTEM_PROMPT
-    agent_tools = ["tech_question_gen", "behavior_question_gen"]
+    agent_tools: list[str] = []
     max_iterations = 4
+
+    # How many top matches get application records (same as old tracker)
+    max_applications = 5
+
+    async def execute(self, state: JobAgentState) -> dict[str, Any]:
+        """Generate independent question sets concurrently, then initialize tracking."""
+        recommendations = selected_recommendations(state)
+        top_job = recommendations[0].get("job", {}) if recommendations else {}
+        profile = redact_pii(state.get("user_profile") or {})
+        job_title = str(top_job.get("title") or "软件工程师")
+        skills = [
+            str(skill) for skill in top_job.get("skills_required", []) if skill
+        ]
+        experiences = self._experiences(profile)
+        technical_usage = empty_token_usage()
+        behavioral_usage = empty_token_usage()
+
+        try:
+            async with asyncio.timeout(get_settings().harness_tool_timeout_seconds):
+                technical, behavioral = await asyncio.gather(
+                    generate_tech_questions(
+                        job_title=job_title,
+                        skills=skills,
+                        difficulty="mixed",
+                        count=5,
+                        use_fallback=bool(state.get("use_fallback_model")),
+                        usage_sink=technical_usage,
+                    ),
+                    generate_behavior_questions(
+                        project_experience=json.dumps(
+                            experiences, ensure_ascii=False, default=str
+                        ),
+                        job_title=job_title,
+                        count=3,
+                        use_fallback=bool(state.get("use_fallback_model")),
+                        usage_sink=behavioral_usage,
+                    ),
+                )
+        except TimeoutError:
+            technical, behavioral = [], []
+
+        questions = [
+            {**question, "id": index}
+            for index, question in enumerate([*technical, *behavioral], 1)
+            if isinstance(question, dict)
+        ]
+        result: dict[str, Any] = {
+            "current_phase": "interview",
+            "interview_questions": questions,
+            "token_usage": merge_token_usage(technical_usage, behavioral_usage),
+        }
+
+        # Embedded tracker responsibility (issue #2)
+        if not state.get("applications"):
+            try:
+                applications = self._create_applications(state)
+                if applications:
+                    result["applications"] = applications
+                    result["kanban_state"] = self._build_kanban_state(applications)
+                    # Traceability: record that tracker work happened
+                    result.setdefault("agent_execution_order", []).append("tracker")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[interview] Inline application creation failed: {e}")
+
+        return result
+
+    @staticmethod
+    def _experiences(profile: dict[str, Any]) -> list[object]:
+        experiences: list[object] = []
+        projects = profile.get("projects")
+        internships = profile.get("internships")
+        if projects:
+            experiences.extend(projects[:3] if isinstance(projects, list) else [projects])
+        if internships:
+            experiences.extend(
+                internships[:2] if isinstance(internships, list) else [internships]
+            )
+        return experiences
+
+    def _create_applications(self, state: JobAgentState) -> list[dict[str, Any]]:
+        """Build application records for the top matched jobs (tracker logic)."""
+        match_results = selected_recommendations(state)
+        applications: list[dict[str, Any]] = []
+        for result in match_results[: self.max_applications]:
+            job = result.get("job", {})
+            applications.append({
+                "job_id": job.get("id", ""),
+                "job_title": job.get("title", ""),
+                "company": job.get("company", ""),
+                "status": "pending",
+                "match_score": result.get("overall_score", 0),
+                "recommendation_reason": result.get("recommendation_reason", ""),
+                "next_follow_up": "3d",
+            })
+        return applications
+
+    @staticmethod
+    def _build_kanban_state(
+        applications: list[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Initialize kanban with all applications in the pending column."""
+        return {
+            "pending": applications,
+            "applied": [],
+            "written_test": [],
+            "round1": [],
+            "round2": [],
+            "hr_interview": [],
+            "offer": [],
+            "rejected": [],
+        }
 
     def _build_initial_messages(self, state: JobAgentState) -> list[BaseMessage]:
         """Build interview question generation task."""
-        match_results = state.get("match_results", [])
-        user_profile = state.get("user_profile") or {}
+        match_results = selected_recommendations(state)
+        user_profile = redact_pii(state.get("user_profile") or {})
         task = self._get_task_instruction(state)
 
         # Get target job info
@@ -42,11 +176,7 @@ class InterviewAgent(BaseAgent):
         skills = top_job.get("skills_required", [])
 
         # Get user experiences for behavioral questions
-        experiences = []
-        if user_profile.get("projects"):
-            experiences.extend(user_profile["projects"][:3] if isinstance(user_profile["projects"], list) else [str(user_profile["projects"])])
-        if user_profile.get("internships"):
-            experiences.extend(user_profile["internships"][:2] if isinstance(user_profile["internships"], list) else [str(user_profile["internships"])])
+        experiences = self._experiences(user_profile)
 
         content = (
             f"请为以下目标岗位生成面试题：\n\n"
@@ -63,15 +193,19 @@ class InterviewAgent(BaseAgent):
             HumanMessage(content=content),
         ]
 
-    def _parse_final_output(self, messages: list[BaseMessage], state: JobAgentState) -> dict:
+    def _parse_final_output(
+        self, messages: list[BaseMessage], state: JobAgentState
+    ) -> dict[str, Any]:
         """Extract interview questions from tool outputs."""
-        questions: list[dict] = []
+        questions: list[dict[str, Any]] = []
 
         # Collect from tool messages
         for msg in messages:
             if not isinstance(msg, ToolMessage):
                 continue
             try:
+                if not isinstance(msg.content, str):
+                    continue
                 data = json.loads(msg.content)
                 if isinstance(data, list):
                     questions.extend(data)
@@ -83,12 +217,10 @@ class InterviewAgent(BaseAgent):
             content = self._get_last_ai_content(messages)
             if content:
                 try:
-                    if "[" in content:
-                        json_str = content[content.index("["):content.rindex("]") + 1]
-                        parsed = json.loads(json_str)
-                        if isinstance(parsed, list):
-                            questions = parsed
-                except (json.JSONDecodeError, ValueError):
+                    parsed = extract_json_array(content)
+                    if isinstance(parsed, list):
+                        questions = parsed
+                except ValueError:
                     pass
 
         # Ensure IDs (create new dicts to avoid in-place mutation of originals)

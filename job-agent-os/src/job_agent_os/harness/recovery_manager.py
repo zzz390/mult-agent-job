@@ -8,11 +8,22 @@ Strategies:
 """
 
 import asyncio
+from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from job_agent_os.settings import get_settings
+
+_fallback_model_requested: ContextVar[bool] = ContextVar(
+    "fallback_model_requested", default=False
+)
+
+
+def is_fallback_model_requested() -> bool:
+    """Return whether the current recovery attempt must use the fallback LLM."""
+    return _fallback_model_requested.get()
 
 
 class RecoveryStrategy(Enum):
@@ -153,7 +164,11 @@ class RecoveryManager:
 
         for attempt in range(1, self.max_retries + 2):  # +1 for degradation attempt
             try:
-                return await func(*args, **kwargs)
+                token = _fallback_model_requested.set(self._use_fallback)
+                try:
+                    return await func(*args, **kwargs)
+                finally:
+                    _fallback_model_requested.reset(token)
             except Exception as e:
                 last_error = e
                 action = self.determine_recovery(node_name, e, attempt)

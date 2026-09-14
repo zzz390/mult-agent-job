@@ -13,6 +13,8 @@ from job_agent_os.core.security import (
     create_refresh_token,
     decode_token,
     hash_password,
+    is_token_revoked,
+    revoke_token,
     verify_password,
 )
 from job_agent_os.models.user import User
@@ -99,6 +101,12 @@ class AuthService:
                 code=ErrorCode.TOKEN_INVALID,
             )
 
+        if await is_token_revoked(payload):
+            raise UnauthorizedException(
+                message="Refresh token has been revoked",
+                code=ErrorCode.TOKEN_INVALID,
+            )
+
         user_id = payload.get("sub")
         if not user_id:
             raise UnauthorizedException(
@@ -109,12 +117,14 @@ class AuthService:
         result = await self.db.execute(select(User).where(User.id == UUID(user_id)))
         user = result.scalar_one_or_none()
 
-        if not user:
+        if not user or user.status != "active":
             raise UnauthorizedException(
                 message="User not found",
                 code=ErrorCode.TOKEN_INVALID,
             )
 
+        # Refresh tokens are one-time use. Replaying the old token is rejected.
+        await revoke_token(refresh_token)
         return self._generate_tokens(user)
 
     def _generate_tokens(self, user: User) -> TokenResponse:

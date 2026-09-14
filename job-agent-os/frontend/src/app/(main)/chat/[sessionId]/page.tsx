@@ -14,9 +14,16 @@ import * as sessionsApi from "@/lib/api/sessions";
 import type {
   SessionResponse,
   SessionProgress,
+  SessionStatus,
   TimelineEvent,
 } from "@/types/session";
 import { PIPELINE_STEPS } from "@/components/chat/ProgressCard";
+
+const HISTORY_POLL_INTERVAL = 2000;
+
+function isLiveSession(status: SessionStatus) {
+  return status === "created" || status === "running";
+}
 
 let idCounter = 0;
 function nextId() {
@@ -40,13 +47,6 @@ function buildMessages(
       timestamp: 0,
       readOnly: true,
     });
-    msgs.push({
-      id: nextId(),
-      kind: "system",
-      content: "已收到你的求职意向，Agent 团队开始协作处理...",
-      timestamp: 0,
-      readOnly: true,
-    });
   }
 
   for (const ev of timeline) {
@@ -59,6 +59,8 @@ function buildMessages(
         pending_steps: PIPELINE_STEPS.map((s) => s.key).filter(
           (k) => !completed.includes(k)
         ),
+        active_agent: null,
+        active_agent_status: "completed",
       };
       msgs.push({
         id: nextId(),
@@ -89,8 +91,10 @@ function buildMessages(
     }
   }
 
-  // If no timeline step events but session has progress, show a final progress card
-  if (completed.length === 0 && session.progress) {
+  // Always append the latest snapshot.  Timeline entries only describe
+  // completed nodes, so omitting this after the first completion hides the
+  // Agent that is currently running.
+  if (session.progress) {
     msgs.push({
       id: nextId(),
       kind: "progress",
@@ -115,50 +119,81 @@ export default function SessionHistoryPage() {
 
   useEffect(() => {
     let mounted = true;
-    async function load() {
-      setLoading(true);
-      setNotFound(false);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let requestInFlight = false;
+    let latestStatus: SessionStatus | null = null;
+
+    async function load(initial = false): Promise<SessionStatus | null> {
+      if (requestInFlight) return latestStatus;
+      requestInFlight = true;
+      if (initial) {
+        setLoading(true);
+        setNotFound(false);
+      }
       try {
         const [sess, timeline] = await Promise.all([
           sessionsApi.getSession(sessionId),
           sessionsApi.getSessionTimeline(sessionId).catch(() => [] as TimelineEvent[]),
         ]);
-        if (!mounted) return;
+        if (!mounted) return latestStatus;
         setSession(sess);
+        latestStatus = sess.status;
 
         let msgs = buildMessages(sess, timeline);
 
-        // Enrich with recommendations if available (read-only)
-        try {
-          const recs = await sessionsApi.getRecommendations(sessionId);
-          if (recs && recs.length > 0) {
-            msgs = [
-              ...msgs,
-              {
-                id: nextId(),
-                kind: "recommendation",
-                content: "岗位推荐结果",
-                timestamp: 0,
-                recommendations: recs,
-                readOnly: true,
-                resolved: true,
-              },
-            ];
+        // Recommendations are only useful after a non-running snapshot. Avoid
+        // a second request every two seconds while a long crawl is active.
+        if (!isLiveSession(sess.status)) {
+          try {
+            const recs = await sessionsApi.getRecommendations(sessionId);
+            if (recs && recs.length > 0) {
+              msgs = [
+                ...msgs,
+                {
+                  id: nextId(),
+                  kind: "recommendation",
+                  content: "岗位推荐结果",
+                  timestamp: 0,
+                  recommendations: recs,
+                  readOnly: true,
+                  resolved: true,
+                },
+              ];
+            }
+          } catch {
+            // recommendations not available; ignore
           }
-        } catch {
-          // recommendations not available; ignore
         }
 
-        setMessages(msgs);
+        if (mounted) setMessages(msgs);
       } catch {
-        if (mounted) setNotFound(true);
+        if (mounted && initial) setNotFound(true);
       } finally {
-        if (mounted) setLoading(false);
+        requestInFlight = false;
+        if (mounted && initial) setLoading(false);
+      }
+
+      return latestStatus;
+    }
+
+    async function poll() {
+      const status = await load();
+      if (mounted && status && isLiveSession(status)) {
+        timer = setTimeout(() => void poll(), HISTORY_POLL_INTERVAL);
       }
     }
-    if (sessionId) load();
+
+    async function initialize() {
+      const status = await load(true);
+      if (mounted && status && isLiveSession(status)) {
+        timer = setTimeout(() => void poll(), HISTORY_POLL_INTERVAL);
+      }
+    }
+
+    if (sessionId) void initialize();
     return () => {
       mounted = false;
+      if (timer) clearTimeout(timer);
     };
   }, [sessionId]);
 

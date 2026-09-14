@@ -5,6 +5,8 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
+from job_agent_os.core.llm_usage import collect_message_usage, message_content_to_text
+from job_agent_os.harness.recovery_manager import is_fallback_model_requested
 from job_agent_os.prompts.loader import load_prompt
 from job_agent_os.settings import get_settings
 
@@ -13,6 +15,8 @@ async def generate_behavior_questions(
     project_experience: str,
     job_title: str,
     count: int = 5,
+    use_fallback: bool = False,
+    usage_sink: dict[str, int | float] | None = None,
 ) -> list[dict[str, Any]]:
     """Generate behavioral interview questions using LLM.
 
@@ -25,8 +29,9 @@ async def generate_behavior_questions(
         List of question dicts in STAR format
     """
     settings = get_settings()
+    use_fallback = use_fallback or is_fallback_model_requested()
     llm = ChatOpenAI(
-        model=settings.openai_model,
+        model=settings.openai_model_fallback if use_fallback else settings.openai_model,
         api_key=settings.openai_api_key.get_secret_value(),
         base_url=settings.openai_base_url,
         temperature=0.3,
@@ -45,12 +50,15 @@ async def generate_behavior_questions(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ])
-        return _parse_questions(response.content)
+        if usage_sink is not None:
+            collect_message_usage(response, usage_sink)
+        questions = _parse_questions(message_content_to_text(response.content))
+        return questions or _fallback_behavior_questions(count)
     except Exception:
         return _fallback_behavior_questions(count)
 
 
-def _parse_questions(content: str) -> list[dict]:
+def _parse_questions(content: str) -> list[dict[str, Any]]:
     """Parse questions from LLM response."""
     try:
         if "```json" in content:
@@ -59,8 +67,9 @@ def _parse_questions(content: str) -> list[dict]:
             json_str = content.split("```")[1].split("```")[0]
         else:
             json_str = content
-        questions = json.loads(json_str.strip())
-        if isinstance(questions, list):
+        decoded = json.loads(json_str.strip())
+        if isinstance(decoded, list):
+            questions = [q for q in decoded if isinstance(q, dict)]
             for i, q in enumerate(questions, 1):
                 q.setdefault("id", i)
                 q.setdefault("type", "behavioral")
@@ -70,7 +79,7 @@ def _parse_questions(content: str) -> list[dict]:
         return []
 
 
-def _fallback_behavior_questions(count: int) -> list[dict]:
+def _fallback_behavior_questions(count: int) -> list[dict[str, Any]]:
     """Generate fallback behavioral questions without LLM."""
     templates = [
         ("请描述一次你在项目中遇到重大技术挑战的经历，你是如何解决的？", "问题解决"),
@@ -79,7 +88,7 @@ def _fallback_behavior_questions(count: int) -> list[dict]:
         ("请举例说明你如何主动发现并解决一个潜在问题？", "主动性"),
         ("请描述一次你向非技术人员解释复杂技术问题的经历？", "沟通能力"),
     ]
-    questions = []
+    questions: list[dict[str, Any]] = []
     for i in range(min(count, len(templates))):
         question, category = templates[i]
         questions.append({

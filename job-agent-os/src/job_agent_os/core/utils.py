@@ -32,10 +32,7 @@ def mask_email(email: str) -> str:
     if len(parts) != 2:
         return email
     name = parts[0]
-    if len(name) <= 1:
-        masked_name = name
-    else:
-        masked_name = name[0] + "*" * (len(name) - 1)
+    masked_name = name if len(name) <= 1 else name[0] + "*" * (len(name) - 1)
     return f"{masked_name}@{parts[1]}"
 
 

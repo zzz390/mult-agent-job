@@ -1,6 +1,6 @@
 """User endpoints."""
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter
 
 from job_agent_os.api.deps import CurrentUser, DBSession
 from job_agent_os.api.response import success_response

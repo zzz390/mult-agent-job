@@ -1,12 +1,16 @@
 """Intent Agent - Parse user job search intent using LLM structured output (ReAct)."""
 
 import json
+import logging
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from job_agent_os.agents.base import BaseAgent
+from job_agent_os.core.json_utils import extract_json_object
 from job_agent_os.graph.state import JobAgentState
+
+logger = logging.getLogger(__name__)
 
 
 class IntentOutput(BaseModel):
@@ -51,6 +55,76 @@ class IntentAgent(BaseAgent):
 
     def _build_initial_messages(self, state: JobAgentState) -> list[BaseMessage]:
         """Build messages with user's input for intent parsing."""
+        user_input = self._extract_user_input(state)
+
+        return [
+            SystemMessage(content=self.system_prompt),
+            HumanMessage(content=f"用户输入: {user_input}\n\n请解析求职意向，以JSON格式输出。"),
+        ]
+
+    async def _prepare_messages(
+        self, state: JobAgentState, messages: list[BaseMessage]
+    ) -> list[BaseMessage]:
+        """Inject recalled long-term preferences into the system prompt.
+
+        Before parsing a new intent, we recall the user's historical job
+        preferences from long-term memory so the LLM can disambiguate
+        partial inputs (e.g. "还是老地方" -> previously preferred city).
+        Failures are non-fatal: memory recall must never block intent parsing.
+        """
+        user_id = state.get("user_id")
+        if not user_id:
+            return messages
+
+        try:
+            memory_context = await self._recall_preference_context(state)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Memory recall skipped: {e}")
+            return messages
+
+        if not memory_context:
+            return messages
+
+        # Append memory context to the system message
+        enriched = []
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                enriched.append(SystemMessage(content=msg.content + memory_context))
+            else:
+                enriched.append(msg)
+        return enriched
+
+    async def _recall_preference_context(self, state: JobAgentState) -> str:
+        """Recall top historical preference memories for the user."""
+        import asyncio
+        from uuid import UUID as _UUID
+
+        from job_agent_os.db.session import get_session_factory
+        from job_agent_os.memory.store import PostgresMemoryStore
+
+        user_input = self._extract_user_input(state)
+
+        async def _recall() -> str:
+            session_factory = get_session_factory()
+            async with session_factory() as db:
+                store = PostgresMemoryStore(db)
+                memories = await store.search_memories(
+                    user_id=_UUID(str(state["user_id"])),
+                    query=user_input,
+                    category="preference",
+                    top_k=3,
+                )
+                if not memories:
+                    return ""
+                pref_texts = [f"- {m.content_text}" for m in memories if m.content_text]
+                if not pref_texts:
+                    return ""
+                return "\n\n用户历史偏好（供参考，仅在用户输入不明确时参考）：\n" + "\n".join(pref_texts)
+
+        return await asyncio.wait_for(_recall(), timeout=3.0)
+
+    def _extract_user_input(self, state: JobAgentState) -> str:
+        """Extract the latest user input text from state."""
         messages = state.get("messages", [])
         user_input = ""
         if messages:
@@ -65,13 +139,7 @@ class IntentAgent(BaseAgent):
         if task and not user_input:
             user_input = task
 
-        if not user_input:
-            user_input = "（用户未提供输入）"
-
-        return [
-            SystemMessage(content=self.system_prompt),
-            HumanMessage(content=f"用户输入: {user_input}\n\n请解析求职意向，以JSON格式输出。"),
-        ]
+        return user_input or "（用户未提供输入）"
 
     def _parse_final_output(self, messages: list[BaseMessage], state: JobAgentState) -> dict:
         """Parse LLM output into structured intent."""
@@ -102,30 +170,26 @@ class IntentAgent(BaseAgent):
                 "clarification_needed": result.get("clarification_needed", False),
                 "clarification_question": result.get("clarification_question"),
             }
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError, ValueError):
             # Fallback: keyword extraction
             return self._fallback_parse(content)
 
     def _extract_json(self, content: str) -> dict:
         """Extract JSON from LLM response text."""
-        if "```json" in content:
-            json_str = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            json_str = content.split("```")[1].split("```")[0]
-        elif "{" in content:
-            json_str = content[content.index("{"):content.rindex("}") + 1]
-        else:
-            json_str = content
-        return json.loads(json_str.strip())
+        return extract_json_object(content)
 
     def _fallback_parse(self, user_input: str) -> dict:
-        """Fallback parsing using simple keyword extraction (case-insensitive)."""
-        # NOTE: These keyword lists are hardcoded for common Chinese regions/directions.
-        # TODO: Expand coverage to more regions, company types, and job directions.
-        #       Consider loading from a config file or database for maintainability.
-        regions = ["河南", "郑州", "北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "洛阳", "开封"]
-        company_types = ["国企", "央企", "民企", "外企", "事业单位", "上市公司"]
-        directions = ["Java", "Python", "前端", "后端", "算法", "测试", "运维", "数据", "Go", "C++", "AI", "大数据"]
+        """Fallback parsing using simple keyword extraction (case-insensitive).
+
+        Keyword lists are loaded from configs/intent_keywords.yaml (cached),
+        so coverage can be extended without code changes.
+        """
+        from job_agent_os.core.config_loader import load_intent_keywords
+
+        keywords = load_intent_keywords()
+        regions = keywords["regions"]
+        company_types = keywords["company_types"]
+        directions = keywords["directions"]
 
         input_lower = user_input.lower()
 

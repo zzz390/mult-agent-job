@@ -166,6 +166,11 @@ class TestOutputValidationGuard:
         with pytest.raises(GuardRailViolation):
             guard.after_node("node", {}, [1, 2, 3])
 
+    def test_core_node_schema_is_strict(self):
+        guard = OutputValidationGuard()
+        with pytest.raises(GuardRailViolation):
+            guard.after_node("search", {}, {"current_phase": "search"})
+
 
 class TestGuardRailChain:
     """Test GuardRailChain middleware."""
@@ -212,7 +217,9 @@ class TestGuardRailChain:
         """Reset should reset all guards in chain."""
         chain = GuardRailChain()
         # Simulate some usage
-        chain.after_node("node", {}, {"token_usage": {"total_tokens": 500}})
+        chain.after_node(
+            "node", {}, {"current_phase": "node", "token_usage": {"total_tokens": 500}}
+        )
         chain.reset()
 
         token_guard = chain.get_guard("token_budget")

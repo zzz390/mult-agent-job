@@ -1,5 +1,6 @@
 """Routing functions for Supervisor-based graph."""
 
+from job_agent_os.graph.contracts import CORE_AGENT_NAMES
 from job_agent_os.graph.state import JobAgentState
 
 
@@ -15,10 +16,7 @@ def route_from_supervisor(state: JobAgentState) -> str:
     next_agent = state.get("next_agent", "__end__")
 
     # Validate against known agents
-    valid_agents = {
-        "intent", "search", "web_search", "parse",
-        "match", "resume", "interview", "tracker",
-    }
+    valid_agents = set(CORE_AGENT_NAMES)
 
     if next_agent in valid_agents:
         return next_agent

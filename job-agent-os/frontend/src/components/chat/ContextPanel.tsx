@@ -1,18 +1,22 @@
 "use client";
 
-import { Activity, AlertCircle, Coins } from "lucide-react";
+import { Activity, AlertCircle, Coins, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { useSessionStore } from "@/stores/session-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { PIPELINE_STEPS } from "./ProgressCard";
+import { agentLabel, PIPELINE_STEPS } from "./ProgressCard";
 
 const TOKEN_BUDGET = 100000;
 
 export function ContextPanel() {
-  const { status, progress, pendingApproval, tokenUsage } = useSessionStore();
+  const { status, currentPhase, progress, pendingApproval, tokenUsage } = useSessionStore();
   const tokenBudget = useAuthStore((s) => s.user?.token_budget_daily ?? TOKEN_BUDGET);
+  const activeAgent =
+    status === "running"
+      ? agentLabel(progress?.active_agent ?? progress?.current_step ?? currentPhase)
+      : null;
 
   const totalTokens =
     tokenUsage.total_tokens ??
@@ -24,11 +28,27 @@ export function ContextPanel() {
 
   return (
     <aside className="hidden w-80 shrink-0 flex-col gap-5 overflow-y-auto border-l bg-card p-4 xl:flex">
+      {/* Current Agent */}
+      <section className="rounded-lg border border-primary/20 bg-primary/5 p-3">
+        <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
+          <Activity className="h-4 w-4 text-primary" />
+          当前执行
+        </div>
+        {activeAgent ? (
+          <div className="flex items-center gap-2 text-sm text-primary">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>{activeAgent} 正在工作</span>
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">当前没有运行中的 Agent</p>
+        )}
+      </section>
+
       {/* Execution progress */}
       <section>
         <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
           <Activity className="h-4 w-4 text-primary" />
-          执行进度
+          执行过程
         </div>
         {progress ? (
           <ol className="space-y-2">
@@ -40,17 +60,17 @@ export function ContextPanel() {
                   <span
                     className={cn(
                       "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
-                      done && "bg-emerald-500 text-white",
                       active && "animate-pulse bg-primary text-primary-foreground",
+                      done && !active && "bg-emerald-500 text-white",
                       !done && !active && "bg-muted text-muted-foreground"
                     )}
                   >
-                    {done ? "✓" : "•"}
+                    {active ? "…" : done ? "✓" : "•"}
                   </span>
                   <span
                     className={cn(
-                      done && "text-emerald-600",
                       active && "font-medium text-primary",
+                      done && !active && "text-emerald-600",
                       !done && !active && "text-muted-foreground"
                     )}
                   >
